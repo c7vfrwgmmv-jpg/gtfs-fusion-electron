@@ -236,6 +236,9 @@ let state = {
   // Structure: columnOrderCache[cacheKey] = [trip_id, ...]
   columnOrderCache: {},
   
+  // Cached directions for current route (loaded from SQL)
+  cachedDirections: [],
+  
   // Performance metrics from last load
   lastLoadMetrics: null
 };
@@ -4161,7 +4164,7 @@ function findMostFrequentTripPattern(trips, stopTimesIndex, stopId, activeServic
 // ═══════════════════════════════════════════════════════════════
 // 8. DIRECTION & HEADSIGN LOGIC
 // ═══════════════════════════════════════════════════════════════
-function getAvailableDirections() {
+async function getAvailableDirections() {
   if (!state.selectedRoute || !state.gtfsData) return [];
 
   let routeIds = [state.selectedRoute.route_id];
@@ -4171,81 +4174,69 @@ function getAvailableDirections() {
       .filter(Boolean);
   }
 
-  let routeTripsAll = [];
-  routeIds.forEach(rid => {
-    const arr = state.gtfsData.tripsIndex[rid] || [];
-    routeTripsAll = routeTripsAll.concat(arr);
-  });
+  try {
+    // Query SQL for direction information with terminal stops
+    const directions = await window.electronAPI.queryDirectionsForRoute(routeIds);
+    
+    if (!directions || directions.length === 0) {
+      state.cachedDirections = [];
+      return [];
+    }
 
-  const dirs = Object.create(null);
-  for (const t of routeTripsAll) {
-    const dirId = String(t.direction_id === undefined || t.direction_id === null ? '0' : t.direction_id);
-    if (!dirs[dirId]) dirs[dirId] = { id: dirId, rows: 0, tripIds: new Set(), byFinalStop: Object.create(null), trips: [] };
-    dirs[dirId].rows++;
-    if (t.trip_id) dirs[dirId].tripIds.add(t.trip_id);
+    // Convert SQL results to the format expected by the UI
+    const perDir = directions.map(d => {
+      const dirId = String(d.direction_id === undefined || d.direction_id === null ? '0' : d.direction_id);
+      const top1Count = Number(d.top1_count || 0);
+      const top2Count = Number(d.top2_count || 0);
+      const top1Label = d.top1_terminal || '';
+      const top2Label = d.top2_terminal || '';
+      const rows = Number(d.total_trips || 0);
+      
+      // Build fullName from terminals
+      let fullName = top1Label || `Direction ${dirId}`;
+      const score = top1Count * 3 + rows;
+      
+      return {
+        dir: dirId,
+        rows: rows,
+        distinctTripIds: rows, // Total trips is same as distinct trip count from SQL
+        top1Count,
+        top1Label,
+        top2Count,
+        top2Label,
+        fullName,
+        score
+      };
+    });
+
+    // Sort by top1Count and rows
+    perDir.sort((a, b) => (b.top1Count - a.top1Count) || (b.rows - a.rows));
     
-    // Extract final stop name from stop_times
-    const stopTimes = getStopTimesIndexOrCache()[t.trip_id] || [];
-    const sorted = stopTimes.slice().sort((a, b) => a.stop_sequence - b.stop_sequence);
-    const lastStopId = sorted[sorted.length - 1]?.stop_id;
-    const lastStop = state.gtfsData.stopsIndex[lastStopId];
-    const directionName = lastStop?.stop_name || '';
+    // Apply heuristic to determine display names
+    const heuristicResult = applyDirectionHeuristic(perDir, 1, 0.30);
+    const labelsMap = heuristicResult.labels || {};
+
+    const result = perDir.map((d) => {
+      const l = labelsMap[d.dir];
+      const displayName = (l && l.display) ? l.display : (d.top1Label || d.fullName || d.dir);
+      const safeDisplay = (displayName && String(displayName).trim()) ? displayName : (d.fullName || d.top1Label || d.dir);
+      return { id: d.dir, name: safeDisplay, fullName: d.fullName, score: d.score };
+    });
+
+    // Cache the result in state
+    state.cachedDirections = result;
+    return result;
     
-    if (directionName) dirs[dirId].byFinalStop[directionName] = (dirs[dirId].byFinalStop[directionName] || 0) + 1;
-    dirs[dirId].trips.push(t);
+  } catch (err) {
+    console.error('[getAvailableDirections] SQL query failed, using cached or empty:', err);
+    // Return cached directions if available, otherwise empty
+    return state.cachedDirections || [];
   }
+}
 
-  const perDir = Object.keys(dirs).map(id => {
-    const info = dirs[id];
-    const finalStopEntries = Object.entries(info.byFinalStop).sort((a,b) => b[1] - a[1]);
-    const top1Count = finalStopEntries.length ? finalStopEntries[0][1] : 0;
-    const top1Label = finalStopEntries.length ? finalStopEntries[0][0] : '';
-    const top2Count = finalStopEntries.length > 1 ? finalStopEntries[1][1] : 0;
-    const top2Label = finalStopEntries.length > 1 ? finalStopEntries[1][0] : '';
-
-    const commonFinalStop = finalStopEntries.length ? finalStopEntries[0][0] : '';
-    let termini = '';
-    let bestStops = null, bestLen = 0;
-    for (const t of info.trips) {
-      const sts = getStopTimesIndexOrCache()[t.trip_id] || [];
-      if (sts.length > bestLen) { bestLen = sts.length; bestStops = sts; }
-    }
-    if (bestStops && bestStops.length > 0) {
-      const first = state.gtfsData.stopsIndex[bestStops[0].stop_id];
-      const last  = state.gtfsData.stopsIndex[bestStops[bestStops.length - 1].stop_id];
-      const firstName = first?.stop_name || bestStops[0].stop_id;
-      const lastName  = last?.stop_name  || bestStops[bestStops.length - 1].stop_id;
-      termini = (firstName && lastName && firstName !== lastName) ? `${firstName} – ${lastName}` : (lastName || firstName || '');
-    }
-    const fullName = commonFinalStop || termini || `Direction ${id}`;
-    const score = (top1Count || 0) * 3 + (info.rows || 0);
-
-    return {
-      dir: id,
-      rows: info.rows,
-      distinctTripIds: info.tripIds.size,
-      top1Count,
-      top1Label,
-      top2Count,
-      top2Label,
-      fullName,
-      score,
-      trips: info.trips
-    };
-  });
-
-  perDir.sort((a,b) => (b.top1Count - a.top1Count) || (b.rows - a.rows));
-  const heuristicResult = applyDirectionHeuristic(perDir, 1, 0.30);
-  const labelsMap = heuristicResult.labels || {};
-
-  const result = perDir.map((d, idx) => {
-    const l = labelsMap[d.dir];
-    const displayName = (l && l.display) ? l.display : (d.top1Label || d.fullName || d.dir);
-    const safeDisplay = (displayName && String(displayName).trim()) ? displayName : (d.fullName || d.top1Label || d.dir);
-    return { id: d.dir, name: safeDisplay, fullName: d.fullName, score: d.score };
-  });
-
-  return result;
+// Synchronous version for use in render - uses cached value
+function getAvailableDirectionsSync() {
+  return state.cachedDirections || [];
 }
 
 function applyDirectionHeuristic(perDir, absDiff = 1, relRatio = 0.30) {
@@ -5092,6 +5083,9 @@ async function selectRoute(routeId, directionId) {
       await batchLoadStopTimes(trips. map(t => t.trip_id));
     }
     
+    // Load and cache directions for this route
+    await getAvailableDirections();
+    
     state.loading = false;
     state.loadingStep = '';
     
@@ -5365,67 +5359,38 @@ function renderVirtualStopsList(groupsToRender) {
   }
 }
 
-// Cached stop-to-routes mapping to avoid rebuilding
-let cachedStopToRoutesMap = null;
-let cachedStopToRoutesHash = null;
+// Cached stops with routes data
+let cachedStopsWithRoutes = null;
 
-// Build stop-to-routes mapping with chunked processing to prevent UI freeze
-async function buildStopToRoutesMapAsync(routes, tripsIndex, stopTimesIndex, onProgress) {
-  const stopToRoutes = new Map();
-  const CHUNK_SIZE = 20; // Process 20 routes at a time
-  
-  for (let i = 0; i < routes.length; i += CHUNK_SIZE) {
-    const routeChunk = routes.slice(i, i + CHUNK_SIZE);
+// Get stops with routes from SQL
+async function getStopsWithRoutes() {
+  try {
+    const stopsWithRoutes = await window.electronAPI.queryStopsWithRoutes();
+    // Cache the successful result
+    cachedStopsWithRoutes = stopsWithRoutes;
+    return stopsWithRoutes;
+  } catch (err) {
+    console.error('[getStopsWithRoutes] SQL query failed:', err);
     
-    routeChunk.forEach(route => {
-      const trips = tripsIndex[route.route_id] || [];
-      const stopIds = new Set();
-      
-      trips.forEach(trip => {
-        const stopTimes = stopTimesIndex[trip.trip_id] || [];
-        stopTimes.forEach(st => stopIds.add(st.stop_id));
-      });
-      
-      stopIds.forEach(stopId => {
-        if (!stopToRoutes.has(stopId)) stopToRoutes.set(stopId, []);
-        stopToRoutes.get(stopId).push(route);
-      });
-    });
-    
-    // Report progress
-    if (onProgress) {
-      const percent = Math.round(((i + routeChunk.length) / routes.length) * 100);
-      onProgress(i + routeChunk.length, routes.length, percent);
+    // First, try to use cached data if available
+    if (cachedStopsWithRoutes) {
+      console.warn('[getStopsWithRoutes] Using cached data from previous successful query');
+      return cachedStopsWithRoutes;
     }
     
-    // Yield to browser to keep UI responsive
-    if (i + CHUNK_SIZE < routes.length) {
-      await new Promise(resolve => setTimeout(resolve, 0));
-    }
+    // Last resort fallback: return stops without route information
+    console.warn('[getStopsWithRoutes] No cache available, returning stops without routes');
+    const fallback = Object.values(state.gtfsData.stopsIndex || {}).map(stop => ({
+      ...stop,
+      routes: [],
+      routeCount: 0
+    }));
+    return fallback;
   }
-  
-  return stopToRoutes;
-}
-
-// Get or build stop-to-routes mapping with caching
-async function getStopToRoutesMap(routes, tripsIndex, stopTimesIndex, onProgress) {
-  const currentHash = routes.length + '_' + Object.keys(tripsIndex).length;
-  
-  if (cachedStopToRoutesMap && cachedStopToRoutesHash === currentHash) {
-    return cachedStopToRoutesMap;
-  }
-  
-  const stopToRoutes = await buildStopToRoutesMapAsync(routes, tripsIndex, stopTimesIndex, onProgress);
-  
-  cachedStopToRoutesMap = stopToRoutes;
-  cachedStopToRoutesHash = currentHash;
-  
-  return stopToRoutes;
 }
 
 function clearStopToRoutesCache() {
-  cachedStopToRoutesMap = null;
-  cachedStopToRoutesHash = null;
+  cachedStopsWithRoutes = null;
 }
 
 async function renderStopsView() {
@@ -5441,31 +5406,11 @@ async function renderStopsView() {
     return;
   }
   
-  // Show loading indicator for initial data preparation
-  const isInitialLoad = !cachedStopToRoutesMap;
-  if (isInitialLoad) {
-    stopsList.innerHTML = '<div class="p-4 text-center text-gray-600">Przygotowywanie danych przystanków...</div>';
-  }
+  // Show loading indicator
+  stopsList.innerHTML = '<div class="p-4 text-center text-gray-600">Ładowanie przystanków...</div>';
   
-  const stopToRoutes = await getStopToRoutesMap(
-    state.gtfsData.routes,
-    state.gtfsData.tripsIndex,
-    getStopTimesIndexOrCache(),
-    isInitialLoad ? (processed, total, percent) => {
-      stopsList.innerHTML = `<div class="p-4 text-center text-gray-600">Przygotowywanie danych przystanków... ${percent}%</div>`;
-    } : null
-  );
-  
-  const stopsData = [];
-  Object.values(state.gtfsData.stopsIndex).forEach(stop => {
-    const routes = stopToRoutes.get(stop.stop_id) || [];
-    // Show ALL stops, even those without routes (Bug #3 fix)
-    stopsData.push({
-      ...stop,
-      routeCount: routes.length,
-      routes: routes
-    });
-  });
+  // Get stops with routes from SQL
+  const stopsData = await getStopsWithRoutes();
   
   // Sortuj alfabetycznie
   stopsData.sort((a, b) => (a.stop_name || '').localeCompare(b.stop_name || ''));
@@ -6596,59 +6541,50 @@ async function openStopTimetable(stopId) {
   const stop = state.gtfsData.stopsIndex[stopId];
   if (!stop) return;
 
-  // Collect departures at this stop
-  // Get active services for selected date
-  const activeServices = getServicesForDate(state.selectedDate);
-  const activeServicesSet = new Set(activeServices);
-  
+  // Use SQL to get all departures at this stop for the selected date
   let allDepartures = [];
-  let tripsToLoad = [];
   
-  if (state.selectedRoute && state.selectedDirection !== undefined) {
-    // Filter by selected route and direction
-    const routeTrips = state.gtfsData.tripsIndex[state.selectedRoute.route_id] || [];
-    const directionTrips = routeTrips.filter(t => 
-      (t.direction_id || '0') === state.selectedDirection && 
-      activeServicesSet.has(t.service_id)
-    );
-    
-    tripsToLoad = directionTrips;
-  } else {
-    // No route/direction filter - show ALL routes
-    state.gtfsData.routes.forEach(route => {
-      const routeTrips = state.gtfsData.tripsIndex[route.route_id] || [];
-      routeTrips.forEach(trip => {
-        if (activeServicesSet.has(trip.service_id)) {
-          tripsToLoad.push({ ...trip, route: route });
-        }
-      });
+  try {
+    const departures = await window.electronAPI.queryDeparturesForStop({
+      stopId: stopId,
+      date: state.selectedDate
     });
-  }
-  
-  // Load stop_times for all trips in parallel batches
-  const BATCH_SIZE = 50;
-  for (let i = 0; i < tripsToLoad.length; i += BATCH_SIZE) {
-    const batch = tripsToLoad.slice(i, Math.min(i + BATCH_SIZE, tripsToLoad.length));
     
-    await Promise.all(batch.map(async (trip) => {
-      await ensureStopTimesLoaded(trip.trip_id);
-      const stopTimes = state.gtfsData.stopTimesIndex[trip.trip_id] || [];
-      const stopTime = stopTimes.find(st => st.stop_id === stopId);
-      
-      if (stopTime) {
-        const departureTime = stopTime.departure_time || stopTime.arrival_time;
-        if (departureTime) {
-          allDepartures.push({
-            trip_id: trip.trip_id,
-            time: departureTime,
-            trip: trip,
-            service_id: trip.service_id,
-            headsign: trip.trip_headsign || '',
-            route: trip.route || state.selectedRoute
-          });
+    // Filter by route/direction if selected
+    if (state.selectedRoute && state.selectedDirection !== undefined) {
+      allDepartures = departures.filter(d => 
+        d.route_id === state.selectedRoute.route_id &&
+        String(d.direction_id || '0') === String(state.selectedDirection)
+      ).map(d => ({
+        trip_id: d.trip_id,
+        time: d.departure_time,
+        service_id: d.service_id,
+        headsign: d.trip_headsign || '',
+        route: {
+          route_id: d.route_id,
+          route_short_name: d.route_short_name,
+          route_long_name: d.route_long_name,
+          route_type: d.route_type
         }
-      }
-    }));
+      }));
+    } else {
+      // No filter - use all departures
+      allDepartures = departures.map(d => ({
+        trip_id: d.trip_id,
+        time: d.departure_time,
+        service_id: d.service_id,
+        headsign: d.trip_headsign || '',
+        route: {
+          route_id: d.route_id,
+          route_short_name: d.route_short_name,
+          route_long_name: d.route_long_name,
+          route_type: d.route_type
+        }
+      }));
+    }
+  } catch (err) {
+    console.error('[openStopTimetable] Failed to query departures:', err);
+    return;
   }
 
   // Determine main destination based on the currently selected route (if any)
@@ -6656,21 +6592,19 @@ async function openStopTimetable(stopId) {
   let mainTerminusStopId = null;
   
   if (state.selectedRoute) {
-    const routeTrips = state.gtfsData.tripsIndex[state.selectedRoute.route_id] || [];
-    const directionTrips = routeTrips.filter(t => (t.direction_id || '0') === state.selectedDirection);
-    
     try {
-      const directions = getAvailableDirections();
+      const directions = await getAvailableDirections();
       const currentDir = directions.find(d => String(d.id) === String(state.selectedDirection));
       if (currentDir) {
         mainDestination = currentDir.fullName || currentDir.name || '';
       }
     } catch (e) {
-      // Ignore errors
+      console.error('[openStopTimetable] Error getting directions:', e);
     }
     
     if (!mainDestination) {
-      const headsigns = directionTrips.map(t => t.trip_headsign).filter(h => h);
+      // Fallback: use most common headsign from departures
+      const headsigns = allDepartures.map(d => d.headsign).filter(h => h);
       const headsignCounts = {};
       headsigns.forEach(h => { headsignCounts[h] = (headsignCounts[h] || 0) + 1; });
       let maxCount = 0;
@@ -6682,26 +6616,36 @@ async function openStopTimetable(stopId) {
       });
     }
 
-    if (mainDestination && directionTrips.length > 0) {
-      const trip = directionTrips.find(t => t.trip_headsign === mainDestination);
-      if (trip) {
-        const stopTimes = getStopTimesIndexOrCache()[trip.trip_id] || [];
-        if (stopTimes.length > 0) {
-          const sortedStopTimes = [...stopTimes].sort((a, b) => parseInt(a.stop_sequence) - parseInt(b.stop_sequence));
-          const lastStopTime = sortedStopTimes[sortedStopTimes.length - 1];
-          mainTerminusStopId = lastStopTime.stop_id;
+    // Get terminus stop for the main destination
+    if (mainDestination && allDepartures.length > 0) {
+      const departure = allDepartures.find(d => d.headsign === mainDestination);
+      if (departure) {
+        try {
+          const stopTimes = await window.electronAPI.queryStopTimes(departure.trip_id);
+          if (stopTimes.length > 0) {
+            const sortedStopTimes = [...stopTimes].sort((a, b) => parseInt(a.stop_sequence) - parseInt(b.stop_sequence));
+            const lastStopTime = sortedStopTimes[sortedStopTimes.length - 1];
+            mainTerminusStopId = lastStopTime.stop_id;
+          }
+        } catch (err) {
+          console.error('[openStopTimetable] Error querying stop times:', err);
         }
       }
     }
 
-    if (!mainDestination && directionTrips.length > 0) {
-      const firstTrip = directionTrips[0];
-      const stopTimes = getStopTimesIndexOrCache()[firstTrip.trip_id] || [];
-      if (stopTimes.length > 0) {
-        const lastStopTime = stopTimes[stopTimes.length - 1];
-        const lastStop = state.gtfsData.stopsIndex[lastStopTime.stop_id];
-        mainDestination = lastStop?.stop_name || '';
-        mainTerminusStopId = lastStopTime.stop_id;
+    if (!mainDestination && allDepartures.length > 0) {
+      const firstDeparture = allDepartures[0];
+      try {
+        const stopTimes = await window.electronAPI.queryStopTimes(firstDeparture.trip_id);
+        if (stopTimes.length > 0) {
+          const sortedStopTimes = [...stopTimes].sort((a, b) => parseInt(a.stop_sequence) - parseInt(b.stop_sequence));
+          const lastStopTime = sortedStopTimes[sortedStopTimes.length - 1];
+          const lastStop = state.gtfsData.stopsIndex[lastStopTime.stop_id];
+          mainDestination = lastStop?.stop_name || '';
+          mainTerminusStopId = lastStopTime.stop_id;
+        }
+      } catch (err) {
+        console.error('[openStopTimetable] Error querying stop times:', err);
       }
     }
   } else {
@@ -7478,7 +7422,7 @@ case VIEW.LOADING:
 
   case VIEW.ROUTE_TIMETABLE:
     // ========== WIDOK LINII z rozkładem ==========
-    const directions = getAvailableDirections();
+    const directions = getAvailableDirectionsSync();
     const dirA = Array.isArray(directions) && directions.length >= 1 ? directions[0] : null;
     const dirB = Array.isArray(directions) && directions.length >= 2 ? directions[1] : null;
     const displayA = dirA ? (dirA.fullName || dirA.name || '') : '';
