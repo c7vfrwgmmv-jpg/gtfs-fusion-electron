@@ -1980,12 +1980,38 @@ async function handleFileUpload(e) {
     
     console.log('[App] GTFS data loaded from', result.fromCache ? 'cache' : 'scratch');
     
-    // Initialize state with database reference
-    state.gtfsData = { loaded: true, stats: result.stats, fromCache: result.fromCache };
+    // Initialize state with database reference and all required indexes
+    state.gtfsData = { 
+      loaded: true, 
+      stats: result.stats, 
+      fromCache: result.fromCache,
+      // Initialize all indexes that the app expects
+      tripsIndex: {},         // Will be populated per-route by selectRoute
+      stopTimesIndex: {},     // Will be populated on-demand
+      stopsIndex: {},         // Will be populated from stop_times queries
+      shapesIndex: {},        // Optional, populated if shapes exist
+      agenciesIndex: {},      // Will be populated from routes query
+      calendar: [],           // Could be loaded if needed
+      calendarDatesByDateIndex: new Map() // Calendar exceptions
+    };
     
     // Load routes and dates from database
     await loadRoutesForUI();
     await loadAvailableDates();
+    
+    // Build agenciesIndex from loaded routes
+    if (state.gtfsData.routes) {
+      state.gtfsData.routes.forEach(route => {
+        if (route.agency_id && route.agency_name) {
+          if (!state.gtfsData.agenciesIndex[route.agency_id]) {
+            state.gtfsData.agenciesIndex[route.agency_id] = {
+              agency_id: route.agency_id,
+              agency_name: route.agency_name
+            };
+          }
+        }
+      });
+    }
     
     // Clear caches
     stationNameToIdCache = null;
@@ -2748,7 +2774,7 @@ function buildRouteProfileForCurrentSelection() {
   const stopTimesIndex = getStopTimesIndexOrCache();
   if (!stopTimesIndex || !tripsIndex || !stopsIndex) return null;
 
-  // 3. Zbierz trips tej logical linii + kierunku (bez filtra daty)
+  // 3. Get trips for current route (will use tripsIndex populated by selectRoute)
   let routeIds = memberRoutes.map(r => r.route_id).filter(Boolean);
   if (!routeIds.length) return null;
 
@@ -4657,6 +4683,10 @@ async function selectRoute(routeId, directionId) {
     // Initialize indexes if needed
     if (!state.gtfsData.stopTimesIndex) state.gtfsData.stopTimesIndex = {};
     if (!state.gtfsData.stopsIndex) state.gtfsData.stopsIndex = {};
+    if (!state.gtfsData.tripsIndex) state.gtfsData.tripsIndex = {};
+    
+    // Populate tripsIndex for compatibility with existing code
+    state.gtfsData.tripsIndex[routeId] = trips;
     
     // Batch load stop times for all trips (more efficient than one-by-one)
     if (trips.length > 0) {
