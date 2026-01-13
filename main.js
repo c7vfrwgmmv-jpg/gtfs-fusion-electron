@@ -383,7 +383,17 @@ ipcMain.handle('query-trips', async (event, { routeId, date, directionId }) => {
         EXCEPT
         SELECT service_id FROM calendar_dates WHERE date = ? AND exception_type = '2'
       )
-      SELECT t.*,
+      SELECT 
+        t.route_id,
+        t.service_id,
+        t.trip_id,
+        t.trip_headsign,
+        t.trip_short_name,
+        t.direction_id,
+        t.block_id,
+        t.shape_id,
+        t.wheelchair_accessible,
+        t.bikes_allowed,
         (SELECT departure_time FROM stop_times WHERE trip_id = t.trip_id ORDER BY CAST(stop_sequence AS INTEGER) ASC LIMIT 1) as first_departure
       FROM trips t
       WHERE t.route_id = ? AND t.direction_id = ? AND t.service_id IN (SELECT service_id FROM active_services)
@@ -400,7 +410,20 @@ ipcMain.handle('query-stop-times', async (event, tripId) => {
   return new Promise((resolve, reject) => {
     const conn = db.connect();
     conn.all(`
-      SELECT st.*, s.stop_name, s.stop_lat, s.stop_lon
+      SELECT 
+        st.trip_id,
+        st.arrival_time,
+        st.departure_time,
+        st.stop_id,
+        st.stop_sequence,
+        st.stop_headsign,
+        st.pickup_type,
+        st.drop_off_type,
+        st.shape_dist_traveled,
+        st.timepoint,
+        s.stop_name,
+        s.stop_lat,
+        s.stop_lon
       FROM stop_times st
       JOIN stops s ON st.stop_id = s.stop_id
       WHERE st.trip_id = ?
