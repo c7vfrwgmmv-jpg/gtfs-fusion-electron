@@ -1985,7 +1985,6 @@ async function loadRoutesForUI() {
   routes.forEach(r => {
     const key = r.agency_name || 'Unknown';
     if (!grouped[key]) grouped[key] = [];
-    r.icon = getRouteIcon(r.route_type);
     r.colorStyle = r.route_color ? `background: #${r.route_color}` : '';
     grouped[key].push(r);
   });
