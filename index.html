@@ -5916,7 +5916,7 @@ function getTripDestination(dep) {
   }
   
   // 2. Fallback: last stop_name from stop_times sequence
-  const stopTimes = getStopTimesIndexOrCache()[dep.trip.trip_id] || [];
+  const stopTimes = getStopTimesIndexOrCache()[dep.trip_id] || [];
   if (stopTimes.length > 0) {
     const sorted = stopTimes.slice().sort((a, b) => {
       const seqA = parseInt(a.stop_sequence || '0', 10);
@@ -7200,31 +7200,46 @@ case VIEW.LOADING:
     
     const allStopIds = stop.stopIds || [stop.stop_id];
     
-    const activeServices = getServicesForDate(state.selectedDate);
     const departures = [];
     const routesAtStop = new Map();
     
-    state.gtfsData.routes.forEach(route => {
-      const trips = state.gtfsData.tripsIndex[route.route_id] || [];
-      trips.forEach(trip => {
-        if (!activeServices.includes(trip.service_id)) return;
-        const stopTimes = getStopTimesIndexOrCache()[trip.trip_id] || [];
-        const stopTime = stopTimes.find(st => st.stop_id === stop.stop_id);
-        if (stopTime) {
-          const departureTime = stopTime.departure_time || stopTime.arrival_time;
-          if (departureTime) {
-            departures.push({
-              route: route,
-              trip: trip,
-              time: departureTime,
-              timeMinutes: Utils.timeToMinutes(departureTime),
-              headsign: trip.trip_headsign || ''
-            });
-            if (!routesAtStop.has(route.route_id)) routesAtStop.set(route.route_id, route);
-          }
-        }
+    try {
+      // Use SQL to get all routes at this stop
+      const routesData = await window.electronAPI.queryRoutesAtStop({
+        stopId: stop.stop_id,
+        date: state.selectedDate
       });
-    });
+      
+      // Build routes map
+      routesData.forEach(routeData => {
+        const route = {
+          route_id: routeData.route_id,
+          route_short_name: routeData.route_short_name,
+          route_long_name: routeData.route_long_name,
+          route_type: routeData.route_type
+        };
+        routesAtStop.set(route.route_id, route);
+      });
+      
+      // Get all departures from SQL
+      const sqlDepartures = await window.electronAPI.queryDeparturesForStop({
+        stopId: stop.stop_id,
+        date: state.selectedDate
+      });
+      
+      sqlDepartures.forEach(d => {
+        departures.push({
+          route: routesAtStop.get(d.route_id),
+          trip: { trip_id: d.trip_id },
+          time: d.departure_time,
+          timeMinutes: Utils.timeToMinutes(d.departure_time),
+          headsign: d.trip_headsign || ''
+        });
+      });
+      
+    } catch (err) {
+      console.error('[Stop detail] SQL error:', err);
+    }
     
     departures.sort((a, b) => a.timeMinutes - b.timeMinutes);
     
@@ -7607,9 +7622,39 @@ document.querySelectorAll('.route-filter-btn').forEach(btn => {
 $('direction-select')?.addEventListener('change', async (e) => {
     const newDirection = String(e.target.value);
     if (newDirection === state.selectedDirection) return; // Avoid redundant updates
+    
     state.selectedDirection = newDirection;
-    // Invalidate canonical cache when direction changes
     invalidateCanonicalCacheForCurrentSelection();
+    
+    // Reload trips for new direction
+    if (state.selectedRoute) {
+      state.loading = true;
+      render(); // Show loading state
+      
+      try {
+        const trips = await window.electronAPI.queryTrips({
+          routeId: state.selectedRoute.route_id,
+          date: state.selectedDate,
+          directionId: newDirection
+        });
+        
+        state.currentTrips = trips;
+        state.gtfsData.tripsIndex[state.selectedRoute.route_id] = trips;
+        
+        // Batch load stop times
+        await batchLoadStopTimes(trips.map(t => t.trip_id));
+        
+        // Reload cached directions
+        await getAvailableDirections();
+        
+      } catch (err) {
+        console.error('[Direction change] Error:', err);
+        state.error = err.message;
+      } finally {
+        state.loading = false;
+      }
+    }
+    
     resetMap();
     render();
   });
