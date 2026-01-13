@@ -347,19 +347,19 @@ ipcMain.handle('query-routes', async () => {
         reject(new Error('Query timeout'));
       }, 10000);
       
-      conn.all(`
+      conn. all(`
         SELECT 
-          r.route_id,
-          r.route_short_name,
+          r. route_id,
+          r. route_short_name,
           r.route_long_name,
-          r. route_type,
-          r. agency_id,
+          r.route_type,
+          r.agency_id,
           COALESCE(a.agency_name, 'Unknown') as agency_name,
           COUNT(DISTINCT t.trip_id) as trip_count
         FROM routes r
         LEFT JOIN agency a ON r.agency_id = a.agency_id
         LEFT JOIN trips t ON r.route_id = t.route_id
-        GROUP BY r.route_id, r.route_short_name, r.route_long_name, r.route_type, r.agency_id, a.agency_name
+        GROUP BY r.route_id, r. route_short_name, r. route_long_name, r. route_type, r.agency_id, a.agency_name
         ORDER BY r.route_short_name
       `, (err, rows) => {
         clearTimeout(timeout);
@@ -373,63 +373,19 @@ ipcMain.handle('query-routes', async () => {
       });
     });
     
-    return convertBigIntsToNumbers(rows || []);
-    
-  } catch (err) {
-    console.error('[SQL] query-routes FAILED:', err);
-    throw err;
-  } finally {
-    conn. close();
-    console.log('[SQL] query-routes connection closed');
-  }
-});
-    
-    const columnSet = new Set(columns.map(c => c.column_name.toLowerCase()));
-    
-    // Build SELECT clause with only existing columns
-    const selectClauses = ['r.route_id'];
-    
-    // Required columns (should always exist)
-    if (columnSet.has('route_short_name')) selectClauses.push('ANY_VALUE(r.route_short_name) as route_short_name');
-    if (columnSet.has('route_long_name')) selectClauses.push('ANY_VALUE(r.route_long_name) as route_long_name');
-    if (columnSet.has('route_type')) selectClauses.push('ANY_VALUE(r.route_type) as route_type');
-    
-    // Optional columns
-    if (columnSet.has('agency_id')) selectClauses.push('ANY_VALUE(r.agency_id) as agency_id');
-    if (columnSet.has('route_desc')) selectClauses.push('ANY_VALUE(r.route_desc) as route_desc');
-    if (columnSet.has('route_url')) selectClauses.push('ANY_VALUE(r.route_url) as route_url');
-    if (columnSet.has('route_color')) selectClauses.push('ANY_VALUE(r.route_color) as route_color');
-    if (columnSet.has('route_text_color')) selectClauses.push('ANY_VALUE(r.route_text_color) as route_text_color');
-    
-    selectClauses.push('COALESCE(ANY_VALUE(a.agency_name), \'Unknown\') as agency_name');
-    selectClauses.push('COUNT(DISTINCT t.trip_id) as trip_count');
-    
-    const query = `
-      SELECT ${selectClauses.join(', ')}
-      FROM routes r
-      LEFT JOIN agency a ON r.agency_id = a.agency_id
-      LEFT JOIN trips t ON r.route_id = t.route_id
-      GROUP BY r.route_id
-      ORDER BY ANY_VALUE(r.route_short_name)
-    `;
-    
-    // Execute main query with timeout
-    const rows = new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => reject(new Error('Query timeout')), 10000);
-      conn.all(query, (err, rows) => {
-        clearTimeout(timeout);
-        err ? reject(err) : resolve(rows);
-      });
-    });
-    
-    console.log('[SQL] query-routes SUCCESS:', rows.length, 'rows');
-    return convertBigIntsToNumbers(rows || []);
-    
-  } catch (err) {
-    console.error('[SQL] query-routes FAILED:', err);
-    throw err;
-  } finally {
     conn.close();
+    console.log('[SQL] query-routes connection closed');
+    
+    return convertBigIntsToNumbers(rows || []);
+    
+  } catch (err) {
+    console.error('[SQL] query-routes FAILED:', err);
+    try {
+      conn.close();
+    } catch (e) {
+      // ignore close errors
+    }
+    throw err;
   }
 });
 
@@ -441,59 +397,62 @@ ipcMain.handle('query-trips', async (event, { routeId, date, directionId }) => {
   try {
     console.log('[SQL] query-trips START - routeId:', routeId, 'date:', date, 'directionId:', directionId);
     
-    // ✅ Sprawdź czy routeId nie jest undefined
+    // Validate inputs
     if (!routeId) {
       throw new Error('routeId is required');
     }
     
-    // ✅ Upewnij się że directionId jest stringiem
-    const direction = String(directionId || '0');
+    if (!date || date.length !== 8) {
+      throw new Error('Invalid date format (expected YYYYMMDD)');
+    }
+    
+    // Ensure directionId is a string
+    const direction = String(directionId ??  '0');
     
     const dateObj = new Date(
       parseInt(date.substring(0, 4)),
-      parseInt(date.substring(4, 6)) - 1,
+      parseInt(date. substring(4, 6)) - 1,
       parseInt(date.substring(6, 8))
     );
     const dayNames = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
     const dayColumn = dayNames[dateObj.getDay()];
     
-    // ✅ Check which tables exist
+    // Check which tables exist
     const tables = await new Promise((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error('Query timeout getting tables')), 10000);
       conn.all(`SELECT table_name FROM information_schema.tables WHERE table_schema = 'main'`, 
         (err, rows) => {
           clearTimeout(timeout);
-          err ? reject(err) : resolve(rows);
+          if (err) reject(err);
+          else resolve(rows);
         });
     });
     
     const tableSet = new Set(tables. map(t => t.table_name. toLowerCase()));
-    const hasCalendar = tableSet. has('calendar');
-    const hasCalendarDates = tableSet. has('calendar_dates');
+    const hasCalendar = tableSet.has('calendar');
+    const hasCalendarDates = tableSet.has('calendar_dates');
     
-    console.log('[SQL] Tables found - calendar:', hasCalendar, 'calendar_dates:', hasCalendarDates);
+    console.log('[SQL] Tables - calendar:', hasCalendar, 'calendar_dates:', hasCalendarDates);
     
-    // Get columns with timeout
+    // Get trips table columns
     const columns = await new Promise((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error('Query timeout getting columns')), 10000);
       conn.all(`SELECT column_name FROM information_schema. columns WHERE table_name = 'trips'`, 
         (err, rows) => {
           clearTimeout(timeout);
-          err ? reject(err) : resolve(rows);
+          if (err) reject(err);
+          else resolve(rows);
         });
     });
     
-    const columnSet = new Set(columns.map(c => c.column_name.toLowerCase()));
+    const columnSet = new Set(columns. map(c => c.column_name.toLowerCase()));
     
-    // Build SELECT clause with only existing columns
+    // Build SELECT clause
     const selectClauses = [];
     
-    // Required columns
     if (columnSet.has('route_id')) selectClauses.push('t.route_id');
     if (columnSet.has('service_id')) selectClauses.push('t.service_id');
     if (columnSet.has('trip_id')) selectClauses.push('t.trip_id');
-    
-    // Optional columns
     if (columnSet.has('trip_headsign')) selectClauses.push('t.trip_headsign');
     if (columnSet.has('trip_short_name')) selectClauses.push('t.trip_short_name');
     if (columnSet.has('direction_id')) selectClauses.push('t. direction_id');
@@ -504,18 +463,17 @@ ipcMain.handle('query-trips', async (event, { routeId, date, directionId }) => {
     
     selectClauses.push('(SELECT departure_time FROM stop_times WHERE trip_id = t.trip_id ORDER BY CAST(stop_sequence AS INTEGER) ASC LIMIT 1) as first_departure');
     
-    // ✅ Build query dynamically based on available tables
+    // Build query based on available tables
     let query;
     let params;
     
     if (hasCalendar && hasCalendarDates) {
-      // Full query with calendar support
       query = `
         WITH active_services AS (
           SELECT service_id FROM calendar
           WHERE start_date <= ? AND end_date >= ? AND ${dayColumn} = '1'
           UNION
-          SELECT service_id FROM calendar_dates WHERE date = ? AND exception_type = '1'
+          SELECT service_id FROM calendar_dates WHERE date = ?  AND exception_type = '1'
           EXCEPT
           SELECT service_id FROM calendar_dates WHERE date = ? AND exception_type = '2'
         )
@@ -527,7 +485,6 @@ ipcMain.handle('query-trips', async (event, { routeId, date, directionId }) => {
       params = [date, date, date, date, routeId, direction];
       
     } else if (hasCalendar) {
-      // Only calendar table
       query = `
         WITH active_services AS (
           SELECT service_id FROM calendar
@@ -541,7 +498,6 @@ ipcMain.handle('query-trips', async (event, { routeId, date, directionId }) => {
       params = [date, date, routeId, direction];
       
     } else {
-      // No calendar - return all trips for the route
       console.warn('[SQL] No calendar tables - returning all trips');
       query = `
         SELECT ${selectClauses.join(', ')}
@@ -552,17 +508,15 @@ ipcMain.handle('query-trips', async (event, { routeId, date, directionId }) => {
       params = [routeId, direction];
     }
     
-    console.log('[SQL] Executing query with', params.length, 'parameters:', params);
+    console.log('[SQL] Query params:', params);
     
-    // Execute main query with timeout
+    // Execute query
     const rows = await new Promise((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error('Query timeout')), 30000);
       conn.all(query, params, (err, rows) => {
         clearTimeout(timeout);
         if (err) {
           console.error('[SQL] Query error:', err);
-          console.error('[SQL] Query was:', query);
-          console.error('[SQL] Params were:', params);
           reject(err);
         } else {
           resolve(rows);
@@ -570,14 +524,18 @@ ipcMain.handle('query-trips', async (event, { routeId, date, directionId }) => {
       });
     });
     
-    console.log('[SQL] query-trips SUCCESS:', rows.length, 'rows');
+    console.log('[SQL] query-trips SUCCESS:', rows. length, 'rows');
     
     conn.close();
     return convertBigIntsToNumbers(rows);
     
   } catch (error) {
     console.error('[SQL] query-trips ERROR:', error);
-    conn.close();
+    try {
+      conn.close();
+    } catch (e) {
+      // ignore close errors
+    }
     throw error;
   }
 });
@@ -739,6 +697,7 @@ app.on('quit', async () => {
   if (db) await new Promise((resolve) => db.close(resolve));
 
 });
+
 
 
 
