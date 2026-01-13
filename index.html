@@ -195,6 +195,12 @@ let state = {
   selectedStop: null,
   stopViewFilteredRoutes: [],
   
+  // DuckDB state
+  currentTrips: [],
+  currentStopTimes: [],
+  selectedTrip: null,
+  currentShape: null,
+  
   // Stops list view state
   expandedStopGroup: null,
   stopsListMapState: null,
@@ -4616,7 +4622,7 @@ async function selectRoute(routeId, directionId) {
   try {
     const trips = await window.electronAPI.queryTrips({ routeId, date: state.selectedDate, directionId: directionId || '0' });
     state.currentTrips = trips;
-    state.selectedRoute = state.gtfsData.routes.find(r => r.route_id === routeId);
+    state.selectedRoute = (state.gtfsData.routes || []).find(r => r.route_id === routeId);
     state.selectedDirection = directionId || '0';
     
     // Load stop times for all trips to populate cache
