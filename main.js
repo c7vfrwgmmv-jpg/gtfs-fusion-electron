@@ -335,51 +335,60 @@ function convertBigIntsToNumbers(obj) {
 
 ipcMain.handle('query-routes', async () => {
   if (!db) throw new Error('Database not loaded');
-  
   const conn = db.connect();
-  
+
   try {
     console.log('[SQL] query-routes START');
-    
-    const rows = await new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        console.error('[SQL] query-routes TIMEOUT after 10s');
-        reject(new Error('Query timeout'));
-      }, 10000);
-      
-      conn.all(`
-        SELECT 
-          r.route_id,
-          r.route_short_name,
-          r.route_long_name,
-          r. route_type,
-          r. agency_id,
-          COALESCE(a.agency_name, 'Unknown') as agency_name,
-          COUNT(DISTINCT t.trip_id) as trip_count
-        FROM routes r
-        LEFT JOIN agency a ON r.agency_id = a.agency_id
-        LEFT JOIN trips t ON r.route_id = t.route_id
-        GROUP BY r.route_id, r.route_short_name, r.route_long_name, r.route_type, r.agency_id, a.agency_name
-        ORDER BY r.route_short_name
-      `, (err, rows) => {
-        clearTimeout(timeout);
-        if (err) {
-          console.error('[SQL] query-routes ERROR:', err);
-          reject(err);
-        } else {
-          console.log('[SQL] query-routes SUCCESS:', rows.length, 'rows');
-          resolve(rows);
-        }
-      });
+
+    // 1. Pobierz kolumny:
+    const columns = await new Promise((resolve, reject) => {
+      conn.all(
+        `SELECT column_name FROM information_schema.columns WHERE table_name = 'routes'`,
+        (err, rows) => err ? reject(err) : resolve(rows)
+      );
     });
-    
+    const columnSet = new Set(columns.map(c => c.column_name.toLowerCase()));
+
+    // 2. Zbuduj SELECT dynamicznie:
+const select = [
+  'r.route_id',
+  columnSet.has('route_short_name') && 'ANY_VALUE(r.route_short_name) as route_short_name',
+  columnSet.has('route_long_name') && 'ANY_VALUE(r.route_long_name) as route_long_name',
+  columnSet.has('route_type') && 'ANY_VALUE(r.route_type) as route_type',
+  columnSet.has('agency_id') && 'ANY_VALUE(r.agency_id) as agency_id',
+  "COUNT(DISTINCT t.trip_id) as trip_count"
+].filter(Boolean);
+
+const joinAgency =
+  columnSet.has('agency_id')
+    ? 'LEFT JOIN agency a ON r.agency_id = a.agency_id'
+    : '';
+
+const agencyNameSelect =
+  columnSet.has('agency_id')
+    ? "COALESCE(ANY_VALUE(a.agency_name), 'Unknown') as agency_name"
+    : "'Unknown' as agency_name";
+
+const sql = `
+  SELECT ${select.join(', ')}, ${agencyNameSelect}
+  FROM routes r
+  ${joinAgency}
+  LEFT JOIN trips t ON r.route_id = t.route_id
+  GROUP BY r.route_id
+  ORDER BY ${columnSet.has('route_short_name') ? 'route_short_name' : 'r.route_id'}
+`;
+
+    // 4. Wykonaj query
+    const rows = await new Promise((resolve, reject) => {
+      conn.all(sql, (err, rows) => err ? reject(err) : resolve(rows));
+    });
+
     return convertBigIntsToNumbers(rows || []);
-    
   } catch (err) {
     console.error('[SQL] query-routes FAILED:', err);
     throw err;
   } finally {
-    conn. close();
+    conn.close();
     console.log('[SQL] query-routes connection closed');
   }
 });
