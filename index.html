@@ -4630,12 +4630,42 @@ function renderRouteTable() {
     return;
   }
   
-  container.innerHTML = '';
+container.innerHTML = '';
 
-  const logicalRoutes = state.gtfsData.logicalRoutes || [];
-  const baseRoutes = (state.gtfsData.routes || []).slice();
+// ✅ KONWERSJA:  Jeśli logicalRoutes jest obiektem, przekonwertuj na tablicę
+let logicalRoutes = state.gtfsData. logicalRoutes || [];
+
+if (! Array.isArray(logicalRoutes)) {
+  console.warn('[ROUTE_TABLE] ⚠️  logicalRoutes is an object, converting to array.. .');
   
-  console.log('[ROUTE_TABLE] logicalRoutes:', logicalRoutes);
+  // Konwertuj obiekt {agency: [routes]} na tablicę grup
+  logicalRoutes = Object.entries(logicalRoutes).flatMap(([agencyName, routes]) => {
+    // Grupuj trasy tej agencji po route_short_name
+    const groupedByRoute = {};
+    
+    routes.forEach(route => {
+      const key = route.route_short_name || route.route_id || 'Unknown';
+      if (!groupedByRoute[key]) {
+        groupedByRoute[key] = {
+          route_short_name: key,
+          route_id: key,
+          agency_name: agencyName,
+          members: []
+        };
+      }
+      groupedByRoute[key].members.push(route);
+    });
+    
+    return Object.values(groupedByRoute);
+  });
+  
+  console.log('[ROUTE_TABLE] ✅ Converted to', logicalRoutes.length, 'logical groups');
+  console.log('[ROUTE_TABLE] Sample group:', logicalRoutes[0]);
+}
+
+const baseRoutes = (state.gtfsData.routes || []).slice();
+
+console.log('[ROUTE_TABLE] logicalRoutes:', logicalRoutes);
   console.log('[ROUTE_TABLE] logicalRoutes type:', typeof logicalRoutes);
   console.log('[ROUTE_TABLE] logicalRoutes is Array? ', Array.isArray(logicalRoutes));
   console.log('[ROUTE_TABLE] baseRoutes length:', baseRoutes.length);
