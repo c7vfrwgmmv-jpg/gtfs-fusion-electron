@@ -2106,6 +2106,12 @@ console.log('[App] GTFS data received from main process');
     state.routeProfiles = {};
     state.canonicalMasterLists = {};
     
+    // Load all stops for stops view
+    console.log('[App] Loading all stops...');
+    const allStops = await window.electronAPI.queryAllStops();
+    state.gtfsData.allStops = allStops;
+    console.log('[App] ✅ Loaded', allStops.length, 'total stops');
+    
     // Generate available dates
     console.log('[App] Generating available dates...');
     const dates = generateAvailableDates(
@@ -5144,16 +5150,18 @@ async function renderStopsView() {
     );
   }
   
+  // ✅ Use allStops instead of stopsIndex for complete list
+  const allStopsData = state.gtfsData.allStops || Object.values(state.gtfsData.stopsIndex);
+  
   const stopsData = [];
-  Object.values(state.gtfsData.stopsIndex).forEach(stop => {
+  allStopsData.forEach(stop => {
     const routes = stopToRoutes.get(stop.stop_id) || [];
-    if (routes.length > 0) {
-      stopsData.push({
-        ...stop,
-        routeCount: routes.length,
-        routes: routes
-      });
-    }
+    // Include ALL stops, even those with no routes
+    stopsData.push({
+      ...stop,
+      routeCount: routes.length,
+      routes: routes
+    });
   });
   
   // Sortuj alfabetycznie
