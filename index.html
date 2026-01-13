@@ -4938,10 +4938,10 @@ console.log('[ROUTE_TABLE] logicalRoutes:', logicalRoutes);
 }
 
 async function selectRoute(routeId, directionId) {
-  console.log('🔵 [APP] selectRoute called:', { routeId, directionId, selectedDate:  state.selectedDate });
+  console.log('🔵 [APP] selectRoute called:', { routeId, directionId, selectedDate:   state.selectedDate });
   
   if (!state.selectedDate) {
-    console.error('❌ No selected date! ');
+    console.error('❌ No selected date!  ');
     return;
   }
   
@@ -4950,20 +4950,28 @@ async function selectRoute(routeId, directionId) {
   
   try {
     const params = { 
-      routeId:  routeId, 
+      routeId:   routeId, 
       date: state.selectedDate, 
       directionId: directionId || '0' 
     };
     
-    console. log('📤 Calling queryTrips with:', JSON.stringify(params));
+    console.log('📤 Calling queryTrips with:', JSON.stringify(params));
     
     const trips = await window.electronAPI.queryTrips(params);
     
     console.log('📥 Received trips:', trips.length);
     
+    state.currentTrips = trips;
+    state.selectedRoute = (state.gtfsData. routes || []).find(r => r.route_id === routeId);
+    state.selectedDirection = directionId || '0';
+    
+    // ✅ DODAJ TO JEŚLI NIE MA: 
+    state.view = 'route';  // ⚠️  To jest KLUCZOWE!
+    console.log('✅ Set state.view to:', state.view);
+    
     // Initialize indexes if needed
-    if (!state.gtfsData.stopTimesIndex) state.gtfsData.stopTimesIndex = {};
-    if (!state.gtfsData.stopsIndex) state.gtfsData.stopsIndex = {};
+    if (!state.gtfsData. stopTimesIndex) state.gtfsData.stopTimesIndex = {};
+    if (!state.gtfsData.stopsIndex) state.gtfsData.  stopsIndex = {};
     if (!state.gtfsData.tripsIndex) state.gtfsData.tripsIndex = {};
     
     // Populate tripsIndex for compatibility with existing code
@@ -4974,13 +4982,23 @@ async function selectRoute(routeId, directionId) {
       state.loadingStep = `Loading stop times for ${trips.length} trips...`;
       render();
       
-      await batchLoadStopTimes(trips.map(t => t.trip_id));
+      await batchLoadStopTimes(trips. map(t => t.trip_id));
     }
     
     state.loading = false;
     state.loadingStep = '';
+    
+    console.log('✅ selectRoute complete, calling render()');
+    console.log('📊 Final state:', { 
+      view: state.view, 
+      selectedRoute: state.selectedRoute?. route_short_name,
+      tripsCount: state.currentTrips?.length 
+    });
+    
     render();
+    
   } catch (err) {
+    console.error('❌ selectRoute error:', err);
     state.error = err.message;
     state.loading = false;
     render();
