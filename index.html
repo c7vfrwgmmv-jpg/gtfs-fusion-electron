@@ -1918,7 +1918,7 @@ async function handleFileUpload(e) {
   }
   
   // Check if we're in Electron
-  if (!window.electronAPI) {
+  if (! window.electronAPI) {
     alert('This feature requires Electron. Please use the desktop app.');
     return;
   }
@@ -1931,6 +1931,9 @@ async function handleFileUpload(e) {
   clearVariantCache();
   
   try {
+    console.log('=== [PERF] Starting GTFS load ===');
+    console.time('TOTAL_LOAD');
+    
     // Open file dialog
     const filePath = await window.electronAPI.openFileDialog();
     if (!filePath) {
@@ -1941,7 +1944,7 @@ async function handleFileUpload(e) {
     console.log('[App] Selected file:', filePath);
     
     state.loading = true;
-    state.loadingStep = 'Preparing to load GTFS...';
+    state.loadingStep = 'Preparing to load GTFS... ';
     state.loadingProgress = 0;
     state.loadingProgressPercent = 0;
     state.error = '';
@@ -1961,30 +1964,35 @@ async function handleFileUpload(e) {
     });
     
     // Load file in main process
-    console.log('[App] Starting GTFS load...');
+    console.log('[App] Starting GTFS load.. .');
+    console.time('DB_LOAD');
     
     const result = await window.electronAPI.loadGTFSFile(filePath);
     
+    console.timeEnd('DB_LOAD');
     console.log('[App] Raw result from main:', result);
     
     // Cleanup progress listener
     cleanupProgress();
     
-    if (!result) {
+    if (! result) {
       throw new Error('No response from main process');
     }
     
-    if (!result.success) {
+    if (! result.success) {
       throw new Error(result.error || 'Unknown error loading GTFS');
     }
     
     console.log('[App] GTFS data loaded from', result.fromCache ? 'cache' : 'scratch');
     
     // Initialize state with database reference and all required indexes
+    console.log('[PERF] Initializing state...');
+    console.time('STATE_INIT');
+    
     state.gtfsData = { 
       loaded: true, 
       stats: result.stats, 
-      fromCache: result.fromCache,
+      fromCache: result. fromCache,
       // Initialize all indexes that the app expects
       tripsIndex: {},         // Will be populated per-route by selectRoute
       stopTimesIndex: {},     // Will be populated on-demand
@@ -1995,11 +2003,24 @@ async function handleFileUpload(e) {
       calendarDatesByDateIndex: new Map() // Calendar exceptions
     };
     
+    console.timeEnd('STATE_INIT');
+    
     // Load routes and dates from database
+    console.log('[PERF] Loading routes.. .');
+    console.time('LOAD_ROUTES');
     await loadRoutesForUI();
+    console.timeEnd('LOAD_ROUTES');
+    console.log('[PERF] Routes loaded:', state.gtfsData. routes?. length);
+    
+    console.log('[PERF] Loading dates...');
+    console.time('LOAD_DATES');
     await loadAvailableDates();
+    console.timeEnd('LOAD_DATES');
+    console.log('[PERF] Dates loaded:', state.availableDates?. length);
     
     // Build agenciesIndex from loaded routes
+    console.log('[PERF] Building agencies index...');
+    console.time('BUILD_AGENCIES');
     if (state.gtfsData.routes) {
       state.gtfsData.routes.forEach(route => {
         if (route.agency_id && route.agency_name) {
@@ -2012,32 +2033,51 @@ async function handleFileUpload(e) {
         }
       });
     }
+    console.timeEnd('BUILD_AGENCIES');
     
     // Clear caches
+    console.log('[PERF] Clearing caches...');
+    console.time('CLEAR_CACHES');
+    
+    console.time('clear_station_cache');
     stationNameToIdCache = null;
-    // Only clear stops-related caches if we have data to clear
-    // These will be rebuilt on-demand when user navigates to stops view
-    if (Object.keys(state.gtfsData.stopsIndex || {}).length > 0) {
-      clearStopsSearchIndex();
-      clearStopToRoutesCache();
-    }
+    console.timeEnd('clear_station_cache');
+    
+    console.time('clearStopsSearchIndex');
+    clearStopsSearchIndex();
+    console.timeEnd('clearStopsSearchIndex');
+    
+    console.time('clearStopToRoutesCache');
+    clearStopToRoutesCache();
+    console.timeEnd('clearStopToRoutesCache');
+    
+    console.time('clear_other_caches');
     cachedGroupsArray = null;
     lastStopsDataHash = null;
     state.routeProfiles = {};
     state.canonicalMasterLists = {};
+    console.timeEnd('clear_other_caches');
+    
+    console.timeEnd('CLEAR_CACHES');
     
     // NOW show complete after all loading is done
+    console.log('[PERF] Setting loading = false.. .');
     state.loading = false;
     state.loadingStep = 'Complete!';
     state.loadingProgressPercent = 100;
     state.loadingProgress = 0;
     
-    console.log('[App] GTFS loaded successfully!');
+    console.log('[PERF] About to call render()...');
+    console.time('FINAL_RENDER');
     render();
+    console.timeEnd('FINAL_RENDER');
+    
+    console.timeEnd('TOTAL_LOAD');
+    console.log('=== [PERF] GTFS load complete ===');
     
   } catch (err) {
     console.error('[App] Error loading GTFS:', err);
-    state.error = 'Błąd ładowania GTFS: ' + err.message;
+    state.error = 'Błąd ładowania GTFS: ' + err. message;
     state.loading = false;
     state.loadingProgress = 0;
     state.loadingProgressPercent = 0;
