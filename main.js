@@ -756,6 +756,387 @@ ipcMain.handle('query-all-trips', async () => {
   }
 });
 
+// Query departures for a stop on a specific date
+ipcMain.handle('query-departures-for-stop', async (event, { stopId, date }) => {
+  if (!db) throw new Error('Database not loaded');
+  
+  const conn = db.connect();
+  
+  try {
+    console.log('[SQL] query-departures-for-stop START', { stopId, date });
+    
+    if (!stopId) {
+      throw new Error('stopId is required');
+    }
+    
+    if (!date || date.length !== 8) {
+      throw new Error('date must be in YYYYMMDD format');
+    }
+    
+    // Check which tables exist
+    const tables = await new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('Query timeout getting tables')), 10000);
+      conn.all(`SELECT table_name FROM information_schema.tables WHERE table_schema = 'main'`, 
+        (err, rows) => {
+          clearTimeout(timeout);
+          if (err) reject(err);
+          else resolve(rows);
+        });
+    });
+    
+    const tableSet = new Set(tables.map(t => t.table_name.toLowerCase()));
+    const hasCalendar = tableSet.has('calendar');
+    const hasCalendarDates = tableSet.has('calendar_dates');
+    
+    // Parse date for day of week
+    const dateObj = new Date(
+      parseInt(date.substring(0, 4)),
+      parseInt(date.substring(4, 6)) - 1,
+      parseInt(date.substring(6, 8))
+    );
+    const dayNames = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+    const dayColumn = dayNames[dateObj.getDay()];
+    
+    // Build query based on available tables
+    let query;
+    let params;
+    
+    if (hasCalendar && hasCalendarDates) {
+      query = `
+        WITH active_services AS (
+          SELECT service_id FROM calendar
+          WHERE start_date <= $1 AND end_date >= $2 AND ${dayColumn} = '1'
+          UNION
+          SELECT service_id FROM calendar_dates WHERE date = $3 AND exception_type = '1'
+          EXCEPT
+          SELECT service_id FROM calendar_dates WHERE date = $4 AND exception_type = '2'
+        )
+        SELECT 
+          t.trip_id,
+          st.departure_time,
+          t.trip_headsign,
+          r.route_short_name,
+          r.route_long_name,
+          r.route_type,
+          r.route_id,
+          t.direction_id,
+          t.service_id
+        FROM stop_times st
+        JOIN trips t ON st.trip_id = t.trip_id
+        JOIN routes r ON t.route_id = r.route_id
+        WHERE st.stop_id = $5 
+          AND t.service_id IN (SELECT service_id FROM active_services)
+        ORDER BY st.departure_time
+      `;
+      params = [date, date, date, date, stopId];
+      
+    } else if (hasCalendar) {
+      query = `
+        WITH active_services AS (
+          SELECT service_id FROM calendar
+          WHERE start_date <= $1 AND end_date >= $2 AND ${dayColumn} = '1'
+        )
+        SELECT 
+          t.trip_id,
+          st.departure_time,
+          t.trip_headsign,
+          r.route_short_name,
+          r.route_long_name,
+          r.route_type,
+          r.route_id,
+          t.direction_id,
+          t.service_id
+        FROM stop_times st
+        JOIN trips t ON st.trip_id = t.trip_id
+        JOIN routes r ON t.route_id = r.route_id
+        WHERE st.stop_id = $3
+          AND t.service_id IN (SELECT service_id FROM active_services)
+        ORDER BY st.departure_time
+      `;
+      params = [date, date, stopId];
+      
+    } else {
+      // No calendar tables - return all departures at this stop
+      query = `
+        SELECT 
+          t.trip_id,
+          st.departure_time,
+          t.trip_headsign,
+          r.route_short_name,
+          r.route_long_name,
+          r.route_type,
+          r.route_id,
+          t.direction_id,
+          t.service_id
+        FROM stop_times st
+        JOIN trips t ON st.trip_id = t.trip_id
+        JOIN routes r ON t.route_id = r.route_id
+        WHERE st.stop_id = $1
+        ORDER BY st.departure_time
+      `;
+      params = [stopId];
+    }
+    
+    const rows = await new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('Query timeout')), 30000);
+      conn.all(query, ...params, (err, rows) => {
+        clearTimeout(timeout);
+        if (err) {
+          console.error('[SQL] query-departures-for-stop ERROR:', err);
+          reject(err);
+        } else {
+          resolve(rows);
+        }
+      });
+    });
+    
+    console.log('[SQL] query-departures-for-stop SUCCESS:', rows.length, 'departures');
+    return convertBigIntsToNumbers(rows || []);
+    
+  } catch (err) {
+    console.error('[SQL] query-departures-for-stop FAILED:', err);
+    throw err;
+  } finally {
+    conn.close();
+  }
+});
+
+// Query distinct directions for a route with detailed information
+ipcMain.handle('query-directions-for-route', async (event, routeIds) => {
+  if (!db) throw new Error('Database not loaded');
+  
+  const conn = db.connect();
+  
+  try {
+    console.log('[SQL] query-directions-for-route START', { routeIds });
+    
+    // Support both single routeId and array of routeIds
+    const routeIdArray = Array.isArray(routeIds) ? routeIds : [routeIds];
+    
+    if (!routeIdArray.length) {
+      throw new Error('routeId(s) required');
+    }
+    
+    // Build placeholders for SQL IN clause
+    const placeholders = routeIdArray.map(() => '?').join(',');
+    
+    // Query to get direction information with terminal stop details
+    // This gets the most common final stop for each direction
+    const query = `
+      WITH trip_terminals AS (
+        SELECT 
+          t.route_id,
+          t.direction_id,
+          t.trip_id,
+          t.trip_headsign,
+          last_st.stop_id as terminal_stop_id,
+          s.stop_name as terminal_stop_name
+        FROM trips t
+        JOIN (
+          SELECT 
+            trip_id,
+            stop_id,
+            stop_sequence
+          FROM stop_times st1
+          WHERE stop_sequence = (
+            SELECT MAX(CAST(stop_sequence AS INTEGER))
+            FROM stop_times st2
+            WHERE st2.trip_id = st1.trip_id
+          )
+        ) last_st ON t.trip_id = last_st.trip_id
+        LEFT JOIN stops s ON last_st.stop_id = s.stop_id
+        WHERE t.route_id IN (${placeholders})
+      ),
+      direction_stats AS (
+        SELECT 
+          direction_id,
+          terminal_stop_name,
+          COUNT(*) as trip_count
+        FROM trip_terminals
+        GROUP BY direction_id, terminal_stop_name
+      ),
+      top_terminals AS (
+        SELECT 
+          direction_id,
+          terminal_stop_name,
+          trip_count,
+          ROW_NUMBER() OVER (PARTITION BY direction_id ORDER BY trip_count DESC) as rank
+        FROM direction_stats
+      )
+      SELECT 
+        tt.direction_id,
+        COUNT(DISTINCT tt.trip_id) as total_trips,
+        MAX(CASE WHEN t1.rank = 1 THEN t1.terminal_stop_name END) as top1_terminal,
+        MAX(CASE WHEN t1.rank = 1 THEN t1.trip_count END) as top1_count,
+        MAX(CASE WHEN t1.rank = 2 THEN t1.terminal_stop_name END) as top2_terminal,
+        MAX(CASE WHEN t1.rank = 2 THEN t1.trip_count END) as top2_count,
+        MAX(tt.trip_headsign) as sample_headsign
+      FROM trip_terminals tt
+      LEFT JOIN top_terminals t1 ON tt.direction_id = t1.direction_id AND t1.rank <= 2
+      GROUP BY tt.direction_id
+      ORDER BY tt.direction_id
+    `;
+    
+    const rows = await new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('Query timeout')), 30000);
+      conn.all(query, routeIdArray, (err, rows) => {
+        clearTimeout(timeout);
+        if (err) {
+          console.error('[SQL] query-directions-for-route ERROR:', err);
+          reject(err);
+        } else {
+          resolve(rows);
+        }
+      });
+    });
+    
+    console.log('[SQL] query-directions-for-route SUCCESS:', rows.length, 'directions');
+    return convertBigIntsToNumbers(rows || []);
+    
+  } catch (err) {
+    console.error('[SQL] query-directions-for-route FAILED:', err);
+    throw err;
+  } finally {
+    conn.close();
+  }
+});
+
+// Query routes serving a specific stop on a date
+ipcMain.handle('query-routes-at-stop', async (event, { stopId, date }) => {
+  if (!db) throw new Error('Database not loaded');
+  
+  const conn = db.connect();
+  
+  try {
+    console.log('[SQL] query-routes-at-stop START', { stopId, date });
+    
+    if (!stopId) {
+      throw new Error('stopId is required');
+    }
+    
+    if (!date || date.length !== 8) {
+      throw new Error('date must be in YYYYMMDD format');
+    }
+    
+    // Check which tables exist
+    const tables = await new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('Query timeout getting tables')), 10000);
+      conn.all(`SELECT table_name FROM information_schema.tables WHERE table_schema = 'main'`, 
+        (err, rows) => {
+          clearTimeout(timeout);
+          if (err) reject(err);
+          else resolve(rows);
+        });
+    });
+    
+    const tableSet = new Set(tables.map(t => t.table_name.toLowerCase()));
+    const hasCalendar = tableSet.has('calendar');
+    const hasCalendarDates = tableSet.has('calendar_dates');
+    
+    // Parse date for day of week
+    const dateObj = new Date(
+      parseInt(date.substring(0, 4)),
+      parseInt(date.substring(4, 6)) - 1,
+      parseInt(date.substring(6, 8))
+    );
+    const dayNames = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+    const dayColumn = dayNames[dateObj.getDay()];
+    
+    // Build query based on available tables
+    let query;
+    let params;
+    
+    if (hasCalendar && hasCalendarDates) {
+      query = `
+        WITH active_services AS (
+          SELECT service_id FROM calendar
+          WHERE start_date <= $1 AND end_date >= $2 AND ${dayColumn} = '1'
+          UNION
+          SELECT service_id FROM calendar_dates WHERE date = $3 AND exception_type = '1'
+          EXCEPT
+          SELECT service_id FROM calendar_dates WHERE date = $4 AND exception_type = '2'
+        )
+        SELECT DISTINCT 
+          r.route_id,
+          r.route_short_name,
+          r.route_long_name,
+          r.route_type,
+          COUNT(DISTINCT t.trip_id) as trip_count
+        FROM stop_times st
+        JOIN trips t ON st.trip_id = t.trip_id
+        JOIN routes r ON t.route_id = r.route_id
+        WHERE st.stop_id = $5
+          AND t.service_id IN (SELECT service_id FROM active_services)
+        GROUP BY r.route_id, r.route_short_name, r.route_long_name, r.route_type
+        ORDER BY r.route_short_name
+      `;
+      params = [date, date, date, date, stopId];
+      
+    } else if (hasCalendar) {
+      query = `
+        WITH active_services AS (
+          SELECT service_id FROM calendar
+          WHERE start_date <= $1 AND end_date >= $2 AND ${dayColumn} = '1'
+        )
+        SELECT DISTINCT 
+          r.route_id,
+          r.route_short_name,
+          r.route_long_name,
+          r.route_type,
+          COUNT(DISTINCT t.trip_id) as trip_count
+        FROM stop_times st
+        JOIN trips t ON st.trip_id = t.trip_id
+        JOIN routes r ON t.route_id = r.route_id
+        WHERE st.stop_id = $3
+          AND t.service_id IN (SELECT service_id FROM active_services)
+        GROUP BY r.route_id, r.route_short_name, r.route_long_name, r.route_type
+        ORDER BY r.route_short_name
+      `;
+      params = [date, date, stopId];
+      
+    } else {
+      // No calendar tables - return all routes at this stop
+      query = `
+        SELECT DISTINCT 
+          r.route_id,
+          r.route_short_name,
+          r.route_long_name,
+          r.route_type,
+          COUNT(DISTINCT t.trip_id) as trip_count
+        FROM stop_times st
+        JOIN trips t ON st.trip_id = t.trip_id
+        JOIN routes r ON t.route_id = r.route_id
+        WHERE st.stop_id = $1
+        GROUP BY r.route_id, r.route_short_name, r.route_long_name, r.route_type
+        ORDER BY r.route_short_name
+      `;
+      params = [stopId];
+    }
+    
+    const rows = await new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('Query timeout')), 30000);
+      conn.all(query, ...params, (err, rows) => {
+        clearTimeout(timeout);
+        if (err) {
+          console.error('[SQL] query-routes-at-stop ERROR:', err);
+          reject(err);
+        } else {
+          resolve(rows);
+        }
+      });
+    });
+    
+    console.log('[SQL] query-routes-at-stop SUCCESS:', rows.length, 'routes');
+    return convertBigIntsToNumbers(rows || []);
+    
+  } catch (err) {
+    console.error('[SQL] query-routes-at-stop FAILED:', err);
+    throw err;
+  } finally {
+    conn.close();
+  }
+});
+
 // ════════════════════════════════════════════════════════════════
 // APP LIFECYCLE
 // ════════════════════════════════════════════════════════════════

@@ -34,6 +34,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Query available dates
   queryAvailableDates: () => ipcRenderer.invoke('query-available-dates'),
   
+  // Query departures for a stop on a specific date
+  queryDeparturesForStop: (params) => ipcRenderer.invoke('query-departures-for-stop', params),
+  
+  // Query directions for a route
+  queryDirectionsForRoute: (routeId) => ipcRenderer.invoke('query-directions-for-route', routeId),
+  
+  // Query routes at a stop
+  queryRoutesAtStop: (params) => ipcRenderer.invoke('query-routes-at-stop', params),
+  
   // Listen to load progress updates
   onLoadProgress: (callback) => {
     const subscription = (event, data) => callback(data);
