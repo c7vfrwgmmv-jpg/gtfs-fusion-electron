@@ -4604,130 +4604,53 @@ const ROUTES_INITIAL_BATCH = 100; // Pierwsza partia - to co widać na ekranie
 // ✅ Zmień renderRouteTable() na asynchroniczną
 function renderRouteTable() {
   console.log('=== [ROUTE_TABLE] START ===');
-  console.log('[ROUTE_TABLE] Container exists:', !!$('routes-tbody'));
-  console.log('[ROUTE_TABLE] gtfsData exists:', !!state. gtfsData);
-  console.log('[ROUTE_TABLE] logicalRoutes:', state.gtfsData?.logicalRoutes);
-  console.log('[ROUTE_TABLE] logicalRoutes type:', typeof state. gtfsData?.logicalRoutes);
-  console.log('[ROUTE_TABLE] logicalRoutes is Array?', Array.isArray(state.gtfsData?.logicalRoutes));
-  console.log('[ROUTE_TABLE] routes count:', state.gtfsData?.routes?.length);
   console.log('[ROUTE_TABLE] routeGroupMode:', state.routeGroupMode);
   
   const container = $('routes-tbody');
-  if (!container || !state.gtfsData) return;
+  if (!container || !state.gtfsData) {
+    console.log('[ROUTE_TABLE] Early exit - no container or no data');
+    return;
+  }
   
   container.innerHTML = '';
 
   const logicalRoutes = state.gtfsData.logicalRoutes || [];
   const baseRoutes = (state.gtfsData.routes || []).slice();
   
-  console.log('[ROUTE_TABLE] After assignment - logicalRoutes:', logicalRoutes);
-  console.log('[ROUTE_TABLE] After assignment - baseRoutes length:', baseRoutes.length);
-  
+  console.log('[ROUTE_TABLE] logicalRoutes:', logicalRoutes);
+  console.log('[ROUTE_TABLE] logicalRoutes type:', typeof logicalRoutes);
+  console.log('[ROUTE_TABLE] logicalRoutes is Array? ', Array.isArray(logicalRoutes));
+  console.log('[ROUTE_TABLE] baseRoutes length:', baseRoutes.length);
+
   function reprOf(group) {
     return (group && group.members && group.members[0]) || null;
   }
 
   function labelOf(group) {
     const r = reprOf(group);
-    if (!r) return group?. route_short_name || '';
+    if (! r) return group?.route_short_name || '';
     return r.route_short_name || r.route_id || group. route_short_name || '';
   }
 
-  // ✅ OPTYMALIZACJA 1: Cache sortowania
   function sortGroupsByRouteId(arr) {
-    // Użyj prostszego sortowania dla liczb
     return arr.slice().sort((a, b) => {
       const la = String(labelOf(a) || '').trim();
       const lb = String(labelOf(b) || '').trim();
-      
-      // Sprawdź czy są to liczby
-      const numA = parseInt(la, 10);
-      const numB = parseInt(lb, 10);
-      
-      if (! isNaN(numA) && !isNaN(numB)) {
-        return numA - numB; // Szybsze sortowanie numeryczne
-      }
-      
       return la.localeCompare(lb, undefined, { numeric: true, sensitivity: 'base' });
     });
   }
 
   function sortRoutesById(routes) {
-    return routes.slice().sort((a, b) => {
+    return routes. slice().sort((a, b) => {
       const la = String(a.route_short_name || a.route_id || '').trim();
       const lb = String(b.route_short_name || b.route_id || '').trim();
-      
-      const numA = parseInt(la, 10);
-      const numB = parseInt(lb, 10);
-      
-      if (!isNaN(numA) && !isNaN(numB)) {
-        return numA - numB;
-      }
-      
       return la.localeCompare(lb, undefined, { numeric: true, sensitivity: 'base' });
     });
   }
 
-  // ✅ OPTYMALIZACJA 2: Funkcja pomocnicza do tworzenia przycisku
-  function createRouteButton(group, repr) {
-    const metaRt = getRouteTypeMeta(repr.route_type);
-    const btn = document. createElement('button');
-    btn.className = 'route-card';
-    btn.style.borderLeft = `6px solid ${metaRt.color || '#e6eefb'}`;
-
-    const label = labelOf(group);
-    btn.innerHTML = `
-      <div style="display:flex;flex-direction:column;align-items: center;justify-content:center;">
-        <div style="font-weight:700;">${Utils.escapeHtml(label)}</div>
-      </div>
-    `;
-
-    btn.onclick = () => {
-      state.selectedRouteGroup = group;
-      selectRoute(repr.route_id, '0');
-    };
-
-    return btn;
-  }
-
-  // ✅ OPTYMALIZACJA 3: Batch rendering z użyciem requestAnimationFrame
-  async function renderBatch(items, container, createButton, startIndex = 0) {
-    const batchSize = startIndex === 0 ? ROUTES_INITIAL_BATCH : ROUTES_RENDER_BATCH_SIZE;
-    const fragment = document.createDocumentFragment(); // Używaj DocumentFragment
-    
-    const endIndex = Math.min(startIndex + batchSize, items.length);
-    
-    for (let i = startIndex; i < endIndex; i++) {
-      const item = items[i];
-      const btn = createButton(item);
-      if (btn) fragment.appendChild(btn);
-    }
-    
-    container.appendChild(fragment);
-    
-    // Jeśli są jeszcze elementy, renderuj kolejną partię
-    if (endIndex < items.length) {
-      // Pokaż wskaźnik ładowania
-      const loadingDiv = document.createElement('div');
-      loadingDiv.id = 'routes-loading-more';
-      loadingDiv.className = 'p-4 text-center text-gray-500';
-      loadingDiv.textContent = `Ładowanie tras... (${endIndex}/${items.length})`;
-      container.appendChild(loadingDiv);
-      
-      // Użyj requestAnimationFrame dla płynności
-      await new Promise(resolve => requestAnimationFrame(resolve));
-      
-      // Usuń wskaźnik
-      const loader = $('routes-loading-more');
-      if (loader) loader.remove();
-      
-      // Renderuj kolejną partię
-      await renderBatch(items, container, createButton, endIndex);
-    }
-  }
-
-  // === TRYB 1:  LOGICAL (DOMYŚLNY) ===
-  if (state.routeGroupMode === 'logical') {
+  // === TRYB 1: LOGICAL ===
+  if (state.routeGroupMode === 'logical')
+    console.log('[ROUTE_TABLE] Mode: LOGICAL');
     if (!logicalRoutes.length) return;
 
     const grid = document.createElement('div');
@@ -4753,17 +4676,44 @@ function renderRouteTable() {
   }
 
   // === TRYB 2: SERVICE_TYPE ===
-  if (state. routeGroupMode === 'service_type') {
-    if (!logicalRoutes.length) return;
+  if (state.routeGroupMode === 'service_type') {
+    console.log('[ROUTE_TABLE] Mode: SERVICE_TYPE');
+    console.log('[ROUTE_TABLE] logicalRoutes. length:', logicalRoutes.length);
+    
+    if (!logicalRoutes.length) {
+      console.error('[ROUTE_TABLE] No logical routes!  Cannot render SERVICE_TYPE view');
+      console.log('[ROUTE_TABLE] logicalRoutes value:', logicalRoutes);
+      return;
+    }
 
     const byCanonical = new Map();
-    logicalRoutes.forEach(group => {
+    
+    console.log('[ROUTE_TABLE] Grouping routes by canonical type...');
+    
+    logicalRoutes.forEach((group, idx) => {
+      if (idx < 3) {
+        console.log('[ROUTE_TABLE] Sample group', idx, ':', group);
+      }
+      
       const repr = reprOf(group);
-      const can = canonicalFromCode(repr?.route_type);
+      if (!repr) {
+        console.warn('[ROUTE_TABLE] No repr for group:', group);
+        return;
+      }
+      
+      const can = canonicalFromCode(repr?. route_type);
       const key = can || 'other';
-      if (!byCanonical.has(key)) byCanonical.set(key, []);
+      
+      if (idx < 3) {
+        console.log('[ROUTE_TABLE] Group', idx, 'route_type:', repr?.route_type, '-> canonical:', key);
+      }
+      
+      if (! byCanonical.has(key)) byCanonical.set(key, []);
       byCanonical.get(key).push(group);
     });
+
+    console.log('[ROUTE_TABLE] Canonical groups created:', byCanonical.size);
+    console.log('[ROUTE_TABLE] Canonical keys:', Array.from(byCanonical.keys()));
 
     const sortedKeys = Array.from(byCanonical.keys()).sort((a, b) => {
       const orderA = CANONICAL_CATEGORIES[a]?.order ??  999;
@@ -4771,7 +4721,11 @@ function renderRouteTable() {
       return orderA - orderB;
     });
 
-    for (const canonical of sortedKeys) {
+    console.log('[ROUTE_TABLE] Sorted canonical keys:', sortedKeys);
+
+    sortedKeys.forEach(canonical => {
+      console.log('[ROUTE_TABLE] Rendering canonical group:', canonical);
+      
       const titleEl = document.createElement('div');
       titleEl.className = 'canonical-title';
       titleEl.textContent = CANONICAL_CATEGORIES[canonical]?. label || canonical;
@@ -4779,23 +4733,40 @@ function renderRouteTable() {
 
       const grid = document.createElement('div');
       grid.className = 'routes-grid';
-      grid.style.marginBottom = '28px';
-      container.appendChild(grid);
 
       const list = sortGroupsByRouteId(byCanonical.get(canonical) || []);
       
-      // ✅ Batch rendering dla każdej grupy
-      await renderBatch(
-        list,
-        grid,
-        (group) => {
-          const repr = reprOf(group);
-          if (!repr) return null;
-          return createRouteButton(group, repr);
-        }
-      );
-    }
+      console.log('[ROUTE_TABLE] Routes in', canonical, ':', list.length);
+      
+      list.forEach(group => {
+        const repr = reprOf(group);
+        if (!repr) return;
+        const metaRt = getRouteTypeMeta(repr.route_type);
+        const btn = document.createElement('button');
+        btn.className = 'route-card';
+        btn.style.borderLeft = `6px solid ${metaRt.color || '#e6eefb'}`;
 
+        const label = labelOf(group);
+
+        btn.innerHTML = `
+          <div style="display: flex;flex-direction:column;align-items:center;justify-content:center;">
+            <div style="font-weight:700;">${Utils.escapeHtml(label)}</div>
+          </div>
+        `;
+
+        btn.onclick = () => {
+          state.selectedRouteGroup = group;
+          selectRoute(repr.route_id, '0');
+        };
+
+        grid.appendChild(btn);
+      });
+
+      grid.style.marginBottom = '28px';
+      container.appendChild(grid);
+    });
+
+    console.log('[ROUTE_TABLE] SERVICE_TYPE rendering complete');
     return;
   }
 
