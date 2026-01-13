@@ -1,0 +1,24 @@
+{
+  "name": "gtfs-fusion-electron",
+  "version": "1.0.0",
+  "description": "",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron . --max-old-space-size=8192 --max-semi-space-size=128 --expose-gc"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "devDependencies": {
+    "electron": "^39.2.7"
+  },
+  "dependencies": {
+    "@zip.js/zip.js": "^2.8.14",
+    "adm-zip": "^0.5.16",
+    "duckdb": "^1.4.3",
+    "fflate": "^0.8.2",
+    "jszip": "^3.10.1",
+    "yauzl": "^3.2.0"
+  }
+}
