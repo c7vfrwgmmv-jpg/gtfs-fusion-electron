@@ -942,6 +942,80 @@ async function batchLoadStopTimesViaIPC(tripIds, onProgress) {
   console.log(`[Batch] Loaded ${tripIds.length} trips in ${duration.toFixed(0)}ms (${(duration/tripIds.length).toFixed(1)}ms per trip)`);
 }
 
+// Load stop times for all trips that serve a specific stop
+async function loadStopTimesForStop(stopId, onProgress) {
+  if (!stopId || !state.gtfsData) return;
+  
+  console.log(`[LoadStopTimes] Loading stop times for stop: ${stopId}`);
+  
+  // Find all routes that serve this stop
+  let routesToLoad = [];
+  if (state.gtfsData.stopToRoutes && state.gtfsData.stopToRoutes[stopId]) {
+    // Use pre-built mapping
+    routesToLoad = state.gtfsData.stopToRoutes[stopId];
+  } else {
+    // Fallback: search through all routes (slow)
+    console.warn('[LoadStopTimes] stopToRoutes not available, using slow search');
+    return;
+  }
+  
+  // Collect all trip IDs for these routes
+  const tripIds = [];
+  routesToLoad.forEach(routeInfo => {
+    const trips = state.gtfsData.tripsIndex[routeInfo.route_id] || [];
+    trips.forEach(trip => {
+      // Only load if not already in cache
+      if (!stopTimesCache[trip.trip_id]) {
+        tripIds.push(trip.trip_id);
+      }
+    });
+  });
+  
+  if (tripIds.length === 0) {
+    console.log('[LoadStopTimes] All stop times already cached');
+    return;
+  }
+  
+  console.log(`[LoadStopTimes] Loading ${tripIds.length} trips for ${routesToLoad.length} routes`);
+  
+  // Use batch loading via IPC
+  if (window.electronAPI && window.electronAPI.queryStopTimesBatch) {
+    await batchLoadStopTimesViaIPC(tripIds, onProgress);
+  } else if (state.gtfsData.stopTimesDB) {
+    await preloadStopTimesForTrips(tripIds, onProgress);
+  }
+  // If using RAM mode, stop times are already available
+}
+
+// Global function to handle stop selection (called from map popups)
+window.selectStopAndRender = async function(stopId) {
+  const stop = state.gtfsData.stopsIndex[stopId];
+  if (!stop) return;
+  
+  state.selectedStop = stop;
+  state.stopViewFilteredRoutes = [];
+  state.stopsListMapState = null;
+  
+  // Load stop times for this stop before rendering
+  state.loading = true;
+  state.loadingStep = 'Loading stop times...';
+  render();
+  
+  try {
+    await loadStopTimesForStop(stopId, (loaded, total, percent) => {
+      state.loadingStep = `Loading stop times... ${loaded}/${total}`;
+      state.loadingProgressPercent = percent;
+    });
+  } catch (err) {
+    console.error('[Stop] Failed to load stop times:', err);
+  }
+  
+  state.loading = false;
+  state.loadingStep = '';
+  state.loadingProgressPercent = 0;
+  render();
+};
+
 // Cleanup IndexedDB on page unload
 window.addEventListener('beforeunload', () => {
   if (currentDbName) {
@@ -5295,10 +5369,7 @@ async function renderStopsView() {
         // State 1: Lista pokazuje grupy - popup z klikalnym linkiem
         marker.bindPopup(`
           <a href="#" onclick="event.preventDefault(); 
-            state.selectedStop = state.gtfsData.stopsIndex['${stop.stop_id}']; 
-            state.stopViewFilteredRoutes = []; 
-			state.stopsListMapState = null;
-            render(); 
+            selectStopAndRender('${stop.stop_id}'); 
             return false;" 
             style="text-decoration: none; color:inherit;">
             <strong>${Utils.escapeHtml(stop.stop_name)}</strong><br>
@@ -5311,9 +5382,27 @@ async function renderStopsView() {
         });
       } else {
         // State 2: Lista pokazuje przystanki - bezpośrednie przejście do STOP_DETAIL
-        marker.on('click', () => {
+        marker.on('click', async () => {
           state.selectedStop = stop;
           state.stopViewFilteredRoutes = [];
+          
+          // Load stop times before rendering
+          state.loading = true;
+          state.loadingStep = 'Loading stop times...';
+          render();
+          
+          try {
+            await loadStopTimesForStop(stop.stop_id, (loaded, total, percent) => {
+              state.loadingStep = `Loading stop times... ${loaded}/${total}`;
+              state.loadingProgressPercent = percent;
+            });
+          } catch (err) {
+            console.error('[Stop] Failed to load stop times:', err);
+          }
+          
+          state.loading = false;
+          state.loadingStep = '';
+          state.loadingProgressPercent = 0;
           render();
         });
       }
@@ -5380,7 +5469,27 @@ async function renderStopsView() {
           
           state.selectedStop = stop;
           state.stopViewFilteredRoutes = [];
+          
+          // Load stop times for this stop before rendering
+          state.loading = true;
+          state.loadingStep = 'Loading stop times...';
           render();
+          
+          loadStopTimesForStop(stopId, (loaded, total, percent) => {
+            state.loadingStep = `Loading stop times... ${loaded}/${total}`;
+            state.loadingProgressPercent = percent;
+          }).then(() => {
+            state.loading = false;
+            state.loadingStep = '';
+            state.loadingProgressPercent = 0;
+            render();
+          }).catch(err => {
+            console.error('[Stop] Failed to load stop times:', err);
+            state.loading = false;
+            state.loadingStep = '';
+            state.loadingProgressPercent = 0;
+            render();
+          });
         }
         return;
       }
@@ -5451,7 +5560,27 @@ if (stop) {
 
   state.selectedStop = stop;
   state.stopViewFilteredRoutes = [];
+  
+  // Load stop times for this stop before rendering
+  state.loading = true;
+  state.loadingStep = 'Loading stop times...';
   render();
+  
+  loadStopTimesForStop(stopId, (loaded, total, percent) => {
+    state.loadingStep = `Loading stop times... ${loaded}/${total}`;
+    state.loadingProgressPercent = percent;
+  }).then(() => {
+    state.loading = false;
+    state.loadingStep = '';
+    state.loadingProgressPercent = 0;
+    render();
+  }).catch(err => {
+    console.error('[Stop] Failed to load stop times:', err);
+    state.loading = false;
+    state.loadingStep = '';
+    state.loadingProgressPercent = 0;
+    render();
+  });
 }
     };
     
