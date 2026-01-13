@@ -2042,8 +2042,13 @@ async function handleFileUpload(e) {
 }
 
 async function loadRoutesForUI() {
+  console.log('[App] loadRoutesForUI START');
+  
   const timeoutPromise = new Promise((_, reject) => 
-    setTimeout(() => reject(new Error('Timeout loading routes from database')), 15000)
+    setTimeout(() => {
+      console.error('[App] loadRoutesForUI TIMEOUT after 15s');
+      reject(new Error('Timeout loading routes from database'));
+    }, 15000)
   );
   
   try {
@@ -2052,24 +2057,31 @@ async function loadRoutesForUI() {
       timeoutPromise
     ]);
     
+    console.log('[App] loadRoutesForUI SUCCESS - got', routes.length, 'routes');
+    
     const grouped = {};
     routes.forEach(r => {
       const key = r.agency_name || 'Unknown';
       if (!grouped[key]) grouped[key] = [];
-      r.colorStyle = r.route_color ? `background: #${r.route_color}` : '';
-      grouped[key].push(r);
+      r.colorStyle = r.route_color ?  `background:  #${r.route_color}` : '';
+      grouped[key]. push(r);
     });
-    state.gtfsData.logicalRoutes = grouped;
+    state.gtfsData. logicalRoutes = grouped;
     state.gtfsData.routes = routes;
+    
   } catch (err) {
-    console.error('[App] Error loading routes:', err);
-    throw new Error('Failed to load routes: ' + err.message);
+    console.error('[App] loadRoutesForUI FAILED:', err);
+    throw new Error('Failed to load routes:  ' + err.message);
   }
 }
-
 async function loadAvailableDates() {
+  console.log('[App] loadAvailableDates START');
+  
   const timeoutPromise = new Promise((_, reject) => 
-    setTimeout(() => reject(new Error('Timeout loading dates from database')), 15000)
+    setTimeout(() => {
+      console.error('[App] loadAvailableDates TIMEOUT after 15s');
+      reject(new Error('Timeout loading dates from database'));
+    }, 15000)
   );
   
   try {
@@ -2078,12 +2090,14 @@ async function loadAvailableDates() {
       timeoutPromise
     ]);
     
+    console.log('[App] loadAvailableDates SUCCESS - got', ranges.length, 'ranges');
+    
     const dates = new Set();
     ranges.forEach(r => {
       let cur = String(r.start_date || '');
       const endDate = String(r.end_date || '');
       
-      if (!cur || cur.length !== 8 || !endDate || endDate.length !== 8) return;
+      if (!cur || cur.length !== 8 || !endDate || endDate. length !== 8) return;
       
       while (cur <= endDate) {
         dates.add(cur);
@@ -2096,12 +2110,14 @@ async function loadAvailableDates() {
         cur = d.toISOString().substring(0, 10).replace(/-/g, '');
       }
     });
+    
     const availableDatesArray = Array.from(dates).sort();
-    state.availableDates = availableDatesArray.map(d => ({ value: d, label: formatDateLabel(d) }));
+    state.availableDates = availableDatesArray. map(d => ({ value: d, label: formatDateLabel(d) }));
     const today = new Date().toISOString().substring(0, 10).replace(/-/g, '');
     state.selectedDate = dates.has(today) ? today : availableDatesArray[0];
+    
   } catch (err) {
-    console.error('[App] Error loading dates:', err);
+    console.error('[App] loadAvailableDates FAILED:', err);
     throw new Error('Failed to load dates: ' + err.message);
   }
 }
