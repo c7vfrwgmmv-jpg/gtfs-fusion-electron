@@ -2336,26 +2336,53 @@ async function loadAllTrips() {
 async function prepareStopDetailData(stop, selectedDate) {
   if (!stop || !selectedDate || !state.gtfsData) return;
   
-  const activeServices = getServicesForDate(selectedDate);
-  const activeServicesSet = new Set(activeServices);
+  const departures = [];
+  const routesAtStop = new Map();
   
-  // Collect all trips that might stop at this stop
-  const tripsToLoad = [];
-  state.gtfsData.routes.forEach(route => {
-    const trips = state.gtfsData.tripsIndex[route.route_id] || [];
-    trips.forEach(trip => {
-      if (activeServicesSet.has(trip.service_id)) {
-        tripsToLoad.push(trip.trip_id);
-      }
+  try {
+    // Use SQL to get all routes at this stop
+    const routesData = await window.electronAPI.queryRoutesAtStop({
+      stopId: stop.stop_id,
+      date: selectedDate
     });
-  });
-  
-  // Load stop_times in batches
-  const BATCH_SIZE = 100;
-  for (let i = 0; i < tripsToLoad.length; i += BATCH_SIZE) {
-    const batch = tripsToLoad.slice(i, Math.min(i + BATCH_SIZE, tripsToLoad.length));
-    await Promise.all(batch.map(tripId => ensureStopTimesLoaded(tripId)));
+    
+    // Build routes map
+    routesData.forEach(routeData => {
+      const route = {
+        route_id: routeData.route_id,
+        route_short_name: routeData.route_short_name,
+        route_long_name: routeData.route_long_name,
+        route_type: routeData.route_type
+      };
+      routesAtStop.set(route.route_id, route);
+    });
+    
+    // Get all departures from SQL
+    const sqlDepartures = await window.electronAPI.queryDeparturesForStop({
+      stopId: stop.stop_id,
+      date: selectedDate
+    });
+    
+    sqlDepartures.forEach(d => {
+      departures.push({
+        route: routesAtStop.get(d.route_id),
+        trip: { trip_id: d.trip_id },
+        trip_id: d.trip_id,
+        time: d.departure_time,
+        timeMinutes: Utils.timeToMinutes(d.departure_time),
+        headsign: d.trip_headsign || ''
+      });
+    });
+    
+  } catch (err) {
+    console.error('[prepareStopDetailData] SQL error:', err);
   }
+  
+  departures.sort((a, b) => a.timeMinutes - b.timeMinutes);
+  
+  // Store departures in state for rendering
+  state.stopDetailDepartures = departures;
+  state.stopDetailRoutesAtStop = routesAtStop;
 }
 
 function formatDateLabel(dateStr) {
@@ -7200,52 +7227,9 @@ case VIEW.LOADING:
     
     const allStopIds = stop.stopIds || [stop.stop_id];
     
-    const departures = [];
-    const routesAtStop = new Map();
-    
-    try {
-      // Use SQL to get all routes at this stop
-      const routesData = await window.electronAPI.queryRoutesAtStop({
-        stopId: stop.stop_id,
-        date: state.selectedDate
-      });
-      
-      // Build routes map
-      routesData.forEach(routeData => {
-        const route = {
-          route_id: routeData.route_id,
-          route_short_name: routeData.route_short_name,
-          route_long_name: routeData.route_long_name,
-          route_type: routeData.route_type
-        };
-        routesAtStop.set(route.route_id, route);
-      });
-      
-      // Get all departures from SQL
-      const sqlDepartures = await window.electronAPI.queryDeparturesForStop({
-        stopId: stop.stop_id,
-        date: state.selectedDate
-      });
-      
-      sqlDepartures.forEach(d => {
-        departures.push({
-          route: routesAtStop.get(d.route_id),
-          trip: { trip_id: d.trip_id },
-          trip_id: d.trip_id,
-          time: d.departure_time,
-          timeMinutes: Utils.timeToMinutes(d.departure_time),
-          headsign: d.trip_headsign || ''
-        });
-      });
-      
-    } catch (err) {
-      console.error('[Stop detail] SQL error:', err);
-    }
-    
-    departures.sort((a, b) => a.timeMinutes - b.timeMinutes);
-    
-    // Store departures in state for dynamic filtering
-    state.stopDetailDepartures = departures;
+    // Use pre-loaded data from prepareStopDetailData()
+    const departures = state.stopDetailDepartures || [];
+    const routesAtStop = state.stopDetailRoutesAtStop || new Map();
     
     let filteredDepartures = departures;
     if (state.stopViewFilteredRoutes.length > 0) {
@@ -7765,50 +7749,8 @@ $('date-select-stop')?.addEventListener('change', async (e) => {
     filterStopDetailMapLayers(state.stopViewFilteredRoutes);
   }
   
-  const departures = [];
-  const routesAtStop = new Map();
-  
-  try {
-    // Use SQL to get all routes at this stop
-    const routesData = await window.electronAPI.queryRoutesAtStop({
-      stopId: state.selectedStop.stop_id,
-      date: state.selectedDate
-    });
-    
-    // Build routes map
-    routesData.forEach(routeData => {
-      const route = {
-        route_id: routeData.route_id,
-        route_short_name: routeData.route_short_name,
-        route_long_name: routeData.route_long_name,
-        route_type: routeData.route_type
-      };
-      routesAtStop.set(route.route_id, route);
-    });
-    
-    // Get all departures from SQL
-    const sqlDepartures = await window.electronAPI.queryDeparturesForStop({
-      stopId: state.selectedStop.stop_id,
-      date: state.selectedDate
-    });
-    
-    sqlDepartures.forEach(d => {
-      departures.push({
-        route: routesAtStop.get(d.route_id),
-        trip: { trip_id: d.trip_id },
-        trip_id: d.trip_id,
-        time: d.departure_time,
-        timeMinutes: Utils.timeToMinutes(d.departure_time),
-        headsign: d.trip_headsign || ''
-      });
-    });
-    
-  } catch (err) {
-    console.error('[Stop detail date change] SQL error:', err);
-  }
-  
-  departures.sort((a, b) => a.timeMinutes - b.timeMinutes);
-  state.stopDetailDepartures = departures;
+  // Load departure data for the new date
+  await prepareStopDetailData(state.selectedStop, state.selectedDate);
   
   // Update UI
   updateDeparturesTable();
