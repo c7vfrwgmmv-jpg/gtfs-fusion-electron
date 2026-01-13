@@ -4,8 +4,33 @@ const path = require('path');
 const AdmZip = require('adm-zip');
 const fs = require('fs');
 const yauzl = require('yauzl');
+const duckdb = require('duckdb');
+const crypto = require('crypto');
+const os = require('os');
 
 let mainWindow;
+let db = null;
+
+const CACHE_DIR = path.join(app.getPath('userData'), 'cache');
+if (!fs.existsSync(CACHE_DIR)) {
+  fs.mkdirSync(CACHE_DIR, { recursive: true });
+}
+
+async function computeFingerprint(filePath) {
+  const stats = fs.statSync(filePath);
+  const fd = fs.openSync(filePath, 'r');
+  const bufferSize = Math.min(10 * 1024 * 1024, stats.size);
+  const buffer = Buffer.alloc(bufferSize);
+  fs.readSync(fd, buffer, 0, bufferSize, 0);
+  fs.closeSync(fd);
+  
+  const hash = crypto.createHash('sha256');
+  hash.update(buffer);
+  hash.update(stats.size.toString());
+  hash.update(stats.mtime.toISOString());
+  
+  return hash.digest('hex').substring(0, 16);
+}
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -26,387 +51,7 @@ function createWindow() {
 }
 
 // ════════════════════════════════════════════════════════════════
-// UTILITY FUNCTIONS (z utils.js, ale dla Node.js)
-// ════════════════════════════════════════════════════════════════
-
-function normalizeKey(key) {
-  if (!key) return '';
-  let normalized = String(key).toLowerCase().trim();
-  normalized = normalized.replace(/\s+/g, '_');
-  normalized = normalized.replace(/[^\w_]/g, '');
-  
-  // Aliases dla popularnych wariantów
-  const aliases = {
-    'routeid': 'route_id',
-    'tripid': 'trip_id',
-    'serviceid': 'service_id',
-    'stopid': 'stop_id',
-    'shapeid': 'shape_id'
-  };
-  
-  return aliases[normalized] || normalized;
-}
-
-function normalizeRecord(row) {
-  const normalized = {};
-  Object.keys(row).forEach(key => {
-    const normalizedKey = normalizeKey(key);
-    normalized[normalizedKey] = row[key];
-  });
-  return normalized;
-}
-
-// ════════════════════════════════════════════════════════════════
-// CSV PARSER (with quote handling)
-// ════════════════════════════════════════════════════════════════
-
-function parseCSVLine(line) {
-  const result = [];
-  let current = '';
-  let inQuotes = false;
-  
-  for (let i = 0; i < line.length; i++) {
-    const char = line[i];
-    
-    if (char === '"') {
-      if (inQuotes && line[i + 1] === '"') {
-        current += '"';
-        i++;
-      } else {
-        inQuotes = !inQuotes;
-      }
-    } else if (char === ',' && !inQuotes) {
-      result.push(current.trim());
-      current = '';
-    } else {
-      current += char;
-    }
-  }
-  
-  result.push(current.trim());
-  return result;
-}
-
-function parseCSV(text) {
-  const lines = text.split('\n');
-  if (lines.length === 0) return [];
-  
-  // Remove BOM if present
-  const firstLine = lines[0].replace(/^\uFEFF/, '');
-  const headers = parseCSVLine(firstLine);
-  const result = [];
-  
-  for (let i = 1; i < lines.length; i++) {
-    const line = lines[i].trim();
-    if (!line) continue;
-    
-    const values = parseCSVLine(line);
-    const row = {};
-    
-    headers.forEach((header, idx) => {
-      row[header] = values[idx] || '';
-    });
-    
-    result.push(normalizeRecord(row));
-  }
-  
-  return result;
-}
-
-// ════════════════════════════════════════════════════════════════
-// STREAMING STOP_TIMES PARSER (dla bardzo dużych plików)
-// ════════════════════════════════════════════════════════════════
-
-async function parseStopTimesStreaming(zipPath, onProgress) {
-  return new Promise((resolve, reject) => {
-    yauzl.open(zipPath, { lazyEntries: true }, (err, zipfile) => {
-      if (err) return reject(err);
-      
-      const stopTimesIndex = {};
-      let headers = null;
-      let lineBuffer = '';
-      let rowCount = 0;
-      
-      zipfile.readEntry();
-      
-      zipfile.on('entry', (entry) => {
-        // Skip directories and other files
-        if (!/stop_times\.txt$/i.test(entry.fileName)) {
-          zipfile.readEntry();
-          return;
-        }
-        
-        console.log(`[Main] Streaming: ${entry.fileName}`);
-        
-        zipfile.openReadStream(entry, (err, readStream) => {
-          if (err) return reject(err);
-          
-          readStream.setEncoding('utf8');
-          
-          readStream.on('data', (chunk) => {
-            lineBuffer += chunk;
-            const lines = lineBuffer.split('\n');
-            
-            // Keep last incomplete line in buffer
-            lineBuffer = lines.pop() || '';
-            
-            lines.forEach((line) => {
-              line = line.trim();
-              if (!line) return;
-              
-              // First line = headers
-              if (!headers) {
-                const rawHeaders = parseCSVLine(line.replace(/^\uFEFF/, ''));
-                headers = {
-                  tripIdx: -1,
-                  stopIdx: -1,
-                  seqIdx: -1,
-                  arrIdx: -1,
-                  depIdx: -1,
-                  pickupIdx: -1,
-                  dropoffIdx: -1
-                };
-                
-                rawHeaders.forEach((h, i) => {
-                  const normalized = normalizeKey(h);
-                  if (normalized === 'trip_id') headers.tripIdx = i;
-                  else if (normalized === 'stop_id') headers.stopIdx = i;
-                  else if (normalized === 'stop_sequence') headers.seqIdx = i;
-                  else if (normalized === 'arrival_time') headers.arrIdx = i;
-                  else if (normalized === 'departure_time') headers.depIdx = i;
-                  else if (normalized === 'pickup_type') headers.pickupIdx = i;
-                  else if (normalized === 'drop_off_type') headers.dropoffIdx = i;
-                });
-                return;
-              }
-              
-              // Parse data row
-              const cols = parseCSVLine(line);
-              const tripId = cols[headers.tripIdx];
-              if (!tripId) return;
-              
-              if (!stopTimesIndex[tripId]) stopTimesIndex[tripId] = [];
-              
-              stopTimesIndex[tripId].push({
-                stop_id: cols[headers.stopIdx] || '',
-                arrival_time: cols[headers.arrIdx] || '',
-                departure_time: cols[headers.depIdx] || '',
-                stop_sequence: parseInt(cols[headers.seqIdx] || '0', 10),
-                pickup_type: cols[headers.pickupIdx] || '0',
-                drop_off_type: cols[headers.dropoffIdx] || '0'
-              });
-              
-              rowCount++;
-              
-              // Progress every 100k rows
-              if (rowCount % 100000 === 0 && onProgress) {
-                onProgress({
-                  step: `Parsing stop_times... ${rowCount.toLocaleString()} rows`,
-                  percent: 60 + Math.min(30, Math.floor(rowCount / 500000))
-                });
-              }
-            });
-          });
-          
-          readStream.on('end', () => {
-            // Process last line if exists
-            if (lineBuffer.trim() && headers) {
-              const cols = parseCSVLine(lineBuffer.trim());
-              const tripId = cols[headers.tripIdx];
-              if (tripId) {
-                if (!stopTimesIndex[tripId]) stopTimesIndex[tripId] = [];
-                stopTimesIndex[tripId].push({
-                  stop_id: cols[headers.stopIdx] || '',
-                  arrival_time: cols[headers.arrIdx] || '',
-                  departure_time: cols[headers.depIdx] || '',
-                  stop_sequence: parseInt(cols[headers.seqIdx] || '0', 10),
-                  pickup_type: cols[headers.pickupIdx] || '0',
-                  drop_off_type: cols[headers.dropoffIdx] || '0'
-                });
-              }
-            }
-            
-            // Sort each trip's stops
-            Object.keys(stopTimesIndex).forEach(tripId => {
-              stopTimesIndex[tripId].sort((a, b) => a.stop_sequence - b.stop_sequence);
-            });
-            
-            console.log(`[Main] Parsed ${Object.keys(stopTimesIndex).length} trips, ${rowCount} total rows`);
-            resolve(stopTimesIndex);
-          });
-          
-          readStream.on('error', reject);
-        });
-      });
-      
-      zipfile.on('end', () => {
-        if (!headers) {
-          reject(new Error('stop_times.txt not found in archive'));
-        }
-      });
-      
-      zipfile.on('error', reject);
-    });
-  });
-}
-
-// ════════════════════════════════════════════════════════════════
-// STOP_TIMES SPECIALIZED PARSER (optimized for medium files)
-// ════════════════════════════════════════════════════════════════
-
-function parseStopTimesOptimized(text, onProgress) {
-  const lines = text.split('\n');
-  if (lines.length === 0) return {};
-  
-  // Parse header
-  const firstLine = lines[0].replace(/^\uFEFF/, '');
-  const rawHeaders = parseCSVLine(firstLine);
-  
-  // Find column indices
-  const headers = {
-    tripIdx: -1,
-    stopIdx: -1,
-    seqIdx: -1,
-    arrIdx: -1,
-    depIdx: -1,
-    pickupIdx: -1,
-    dropoffIdx: -1
-  };
-  
-  rawHeaders.forEach((h, i) => {
-    const normalized = normalizeKey(h);
-    if (normalized === 'trip_id') headers.tripIdx = i;
-    else if (normalized === 'stop_id') headers.stopIdx = i;
-    else if (normalized === 'stop_sequence') headers.seqIdx = i;
-    else if (normalized === 'arrival_time') headers.arrIdx = i;
-    else if (normalized === 'departure_time') headers.depIdx = i;
-    else if (normalized === 'pickup_type') headers.pickupIdx = i;
-    else if (normalized === 'drop_off_type') headers.dropoffIdx = i;
-  });
-  
-  if (headers.tripIdx === -1 || headers.stopIdx === -1) {
-    console.error('Missing required columns in stop_times.txt');
-    return {};
-  }
-  
-  const stopTimesIndex = {};
-  const chunkSize = 50000;
-  
-  for (let i = 1; i < lines.length; i++) {
-    const line = lines[i].trim();
-    if (!line) continue;
-    
-    const cols = parseCSVLine(line);
-    
-    const tripId = cols[headers.tripIdx];
-    if (!tripId) continue;
-    
-    if (!stopTimesIndex[tripId]) stopTimesIndex[tripId] = [];
-    
-    stopTimesIndex[tripId].push({
-      stop_id: cols[headers.stopIdx] || '',
-      arrival_time: cols[headers.arrIdx] || '',
-      departure_time: cols[headers.depIdx] || '',
-      stop_sequence: parseInt(cols[headers.seqIdx] || '0', 10),
-      pickup_type: cols[headers.pickupIdx] || '0',
-      drop_off_type: cols[headers.dropoffIdx] || '0'
-    });
-    
-    // Progress update every chunk
-    if (i % chunkSize === 0 && onProgress) {
-      const percent = 60 + Math.floor(((i / lines.length) * 30));
-      onProgress({
-        step: `Parsing stop_times... ${i.toLocaleString()}/${lines.length.toLocaleString()} rows`,
-        percent
-      });
-    }
-  }
-  
-  // Sort each trip's stops by sequence
-  Object.keys(stopTimesIndex).forEach(tripId => {
-    stopTimesIndex[tripId].sort((a, b) => a.stop_sequence - b.stop_sequence);
-  });
-  
-  console.log(`[Main] Parsed ${Object.keys(stopTimesIndex).length} trips with stop_times`);
-  
-  return stopTimesIndex;
-}
-
-// ════════════════════════════════════════════════════════════════
-// SHAPES PARSER (optimized)
-// ════════════════════════════════════════════════════════════════
-
-function parseShapes(text, onProgress) {
-  const lines = text.split('\n');
-  if (lines.length === 0) return {};
-  
-  const firstLine = lines[0].replace(/^\uFEFF/, '');
-  const rawHeaders = parseCSVLine(firstLine);
-  
-  const headers = {
-    shapeIdx: -1,
-    latIdx: -1,
-    lonIdx: -1,
-    seqIdx: -1
-  };
-  
-  rawHeaders.forEach((h, i) => {
-    const normalized = normalizeKey(h);
-    if (normalized === 'shape_id') headers.shapeIdx = i;
-    else if (normalized === 'shape_pt_lat') headers.latIdx = i;
-    else if (normalized === 'shape_pt_lon') headers.lonIdx = i;
-    else if (normalized === 'shape_pt_sequence') headers.seqIdx = i;
-  });
-  
-  if (headers.shapeIdx === -1 || headers.latIdx === -1 || headers.lonIdx === -1) {
-    console.error('Missing required columns in shapes.txt');
-    return {};
-  }
-  
-  const shapesIndex = {};
-  
-  for (let i = 1; i < lines.length; i++) {
-    const line = lines[i].trim();
-    if (!line) continue;
-    
-    const cols = parseCSVLine(line);
-    
-    const shapeId = cols[headers.shapeIdx];
-    if (!shapeId) continue;
-    
-    if (!shapesIndex[shapeId]) shapesIndex[shapeId] = [];
-    
-    const lat = parseFloat(cols[headers.latIdx]);
-    const lon = parseFloat(cols[headers.lonIdx]);
-    const seq = parseInt(cols[headers.seqIdx] || '0', 10);
-    
-    if (!isNaN(lat) && !isNaN(lon)) {
-      shapesIndex[shapeId].push([lat, lon, seq]);
-    }
-    
-    // Progress update
-    if (i % 100000 === 0 && onProgress) {
-      onProgress({
-        step: `Parsing shapes... ${i.toLocaleString()} points`,
-        percent: 92
-      });
-    }
-  }
-  
-  // Sort by sequence
-  Object.keys(shapesIndex).forEach(shapeId => {
-    shapesIndex[shapeId].sort((a, b) => a[2] - b[2]);
-    // Remove sequence number, keep only [lat, lon]
-    shapesIndex[shapeId] = shapesIndex[shapeId].map(([lat, lon]) => [lat, lon]);
-  });
-  
-  console.log(`[Main] Parsed ${Object.keys(shapesIndex).length} shapes`);
-  
-  return shapesIndex;
-}
-
-// ════════════════════════════════════════════════════════════════
-// MAIN GTFS LOADING FUNCTION
+// DUCKDB DATABASE FUNCTIONS
 // ════════════════════════════════════════════════════════════════
 
 async function loadGTFSFile(filePath) {
@@ -415,243 +60,63 @@ async function loadGTFSFile(filePath) {
   try {
     console.log('[Main] Loading GTFS from:', filePath);
     
-    // Progress helper
     const sendProgress = (step, percent) => {
       if (mainWindow && mainWindow.webContents) {
         mainWindow.webContents.send('gtfs-load-progress', { step, percent });
       }
     };
     
-    // Check file size to determine parsing strategy
-    const stats = fs.statSync(filePath);
-    const fileSizeMB = stats.size / (1024 * 1024);
-    console.log(`[Main] File size: ${fileSizeMB.toFixed(2)} MB`);
+    sendProgress('Validating file...', 2);
+    const fingerprint = await computeFingerprint(filePath);
+    const cacheKey = `gtfs-${fingerprint}`;
+    const cacheDbPath = path.join(CACHE_DIR, `${cacheKey}.db`);
+    const cacheMetaPath = path.join(CACHE_DIR, `${cacheKey}.meta.json`);
     
-    const useStreaming = fileSizeMB > 100; // Use streaming for files > 100MB
-    
-    if (useStreaming) {
-      console.log('[Main] Large file detected - will use streaming parser for stop_times');
-    }
-    
-    // 1. UNZIP
-    sendProgress('Unzipping archive...', 0);
-    
-    const zip = new AdmZip(filePath);
-    const zipEntries = zip.getEntries();
-    
-    console.log(`[Main] Found ${zipEntries.length} files in archive`);
-    
-    // Helper to find and extract file
-    const getFileText = (filename, allowLarge = false) => {
-      const entry = zipEntries.find(e => {
-        const entryName = e.entryName.toLowerCase();
-        return entryName === filename.toLowerCase() || 
-               entryName.endsWith('/' + filename.toLowerCase());
-      });
+    // Check cache
+    if (fs.existsSync(cacheDbPath) && fs.existsSync(cacheMetaPath)) {
+      const meta = JSON.parse(fs.readFileSync(cacheMetaPath));
+      const stats = fs.statSync(filePath);
       
-      if (!entry) {
-        console.warn(`[Main] File not found: ${filename}`);
-        return null;
-      }
+      const fileUnchanged = 
+        meta.sourceSize === stats.size &&
+        meta.sourceMtime === stats.mtime.toISOString() &&
+        meta.sourceHash === fingerprint;
       
-      // Check size before loading into memory
-      const entrySizeMB = entry.header.size / (1024 * 1024);
-      
-      if (!allowLarge && entrySizeMB > 200) {
-        console.warn(`[Main] ${filename} is ${entrySizeMB.toFixed(2)}MB - too large for memory extraction`);
-        return null; // Will be handled by streaming parser
-      }
-      
-      console.log(`[Main] Extracting: ${entry.entryName} (${entrySizeMB.toFixed(2)}MB)`);
-      
-      try {
-        return entry.getData().toString('utf8');
-      } catch (err) {
-        console.error(`[Main] Failed to extract ${filename}:`, err.message);
-        return null;
-      }
-    };
-    
-    sendProgress('Extracting files...', 10);
-    
-    // 2. EXTRACT REQUIRED FILES
-    const routesText = getFileText('routes.txt');
-    const tripsText = getFileText('trips.txt');
-    const stopsText = getFileText('stops.txt');
-    let stopTimesText = useStreaming ? null : getFileText('stop_times.txt');
-    
-    if (!routesText || !tripsText || !stopsText) {
-      throw new Error('Missing required GTFS files (routes.txt, trips.txt, stops.txt)');
-    }
-    
-    // Extract optional files
-    const calendarText = getFileText('calendar.txt');
-    const calendarDatesText = getFileText('calendar_dates.txt');
-    const agenciesText = getFileText('agency.txt');
-    const shapesText = getFileText('shapes.txt');
-    
-    // 3. PARSE FILES
-    sendProgress('Parsing routes...', 20);
-    const routes = parseCSV(routesText);
-    console.log(`[Main] Parsed ${routes.length} routes`);
-    
-    sendProgress('Parsing trips...', 30);
-    const trips = parseCSV(tripsText);
-    console.log(`[Main] Parsed ${trips.length} trips`);
-    
-    sendProgress('Parsing stops...', 40);
-    const stops = parseCSV(stopsText);
-    console.log(`[Main] Parsed ${stops.length} stops`);
-    
-    sendProgress('Parsing calendar...', 50);
-    const calendar = calendarText ? parseCSV(calendarText) : [];
-    const calendarDates = calendarDatesText ? parseCSV(calendarDatesText) : [];
-    const agencies = agenciesText ? parseCSV(agenciesText) : [];
-    
-    console.log(`[Main] Parsed ${calendar.length} calendar entries, ${calendarDates.length} calendar_dates, ${agencies.length} agencies`);
-    
-    // 4. PARSE STOP_TIMES (large file - choose strategy)
-    sendProgress('Parsing stop_times (this may take a while)...', 60);
-    
-    let stopTimesIndex;
-    
-    if (useStreaming || stopTimesText === null) {
-      console.log('[Main] Using streaming parser for stop_times');
-      stopTimesIndex = await parseStopTimesStreaming(filePath, sendProgress);
-    } else {
-      console.log('[Main] Using in-memory parser for stop_times');
-      stopTimesIndex = parseStopTimesOptimized(stopTimesText, sendProgress);
-    }
-    
-    // 5. PARSE SHAPES (optional, large file)
-    let shapesIndex = {};
-    if (shapesText) {
-      sendProgress('Parsing shapes...', 92);
-      shapesIndex = parseShapes(shapesText, sendProgress);
-    }
-    
-    // 6. BUILD INDEXES
-    sendProgress('Building indexes...', 95);
-    
-    const stopsIndex = {};
-    stops.forEach(s => {
-      if (s.stop_id) stopsIndex[s.stop_id] = s;
-    });
-    
-    const tripsIndex = {};
-    trips.forEach(t => {
-      const rid = t.route_id;
-      if (!rid) return;
-      if (!tripsIndex[rid]) tripsIndex[rid] = [];
-      tripsIndex[rid].push(t);
-    });
-    
-    const agenciesIndex = {};
-    agencies.forEach(a => {
-      if (a.agency_id || a.agency_name) {
-        agenciesIndex[a.agency_id || a.agency_name] = a;
-      }
-    });
-    
-    // Build calendar_dates index
-    const calendarDatesByDateIndex = new Map();
-    calendarDates.forEach(cd => {
-      if (!cd.date) return;
-      if (!calendarDatesByDateIndex.has(cd.date)) {
-        calendarDatesByDateIndex.set(cd.date, []);
-      }
-      calendarDatesByDateIndex.get(cd.date).push(cd);
-    });
-    
-    // 6.5 BUILD STOP-TO-ROUTES MAPPING (optimized algorithm)
-    // This helps the renderer show all stops with their serving routes
-    // without needing to load all stop_times into memory
-    sendProgress('Building stop-to-routes index...', 97);
-    console.log('[Main] Building stop-to-routes index...');
-    const mappingStartTime = Date.now();
-    
-    const stopToRoutes = {};
-    const totalRoutes = routes.length;
-    let processedRoutes = 0;
-    
-    // Build route info lookup once (avoid repeated object creation)
-    const routeInfoMap = {};
-    routes.forEach(route => {
-      routeInfoMap[route.route_id] = {
-        route_id: route.route_id,
-        route_short_name: route.route_short_name,
-        route_long_name: route.route_long_name,
-        route_type: route.route_type,
-        route_color: route.route_color,
-        route_text_color: route.route_text_color
-      };
-    });
-    
-    // For each route, find all stops it serves (optimized with single pass)
-    routes.forEach((route, index) => {
-      const routeTrips = tripsIndex[route.route_id] || [];
-      const routeInfo = routeInfoMap[route.route_id];
-      
-      // Use Set for O(1) lookups instead of array searches
-      const seenStops = new Set();
-      
-      // Single pass through all trips for this route
-      for (let i = 0; i < routeTrips.length; i++) {
-        const trip = routeTrips[i];
-        const tripStopTimes = stopTimesIndex[trip.trip_id];
+      if (fileUnchanged) {
+        console.log('[Cache] HIT - loading from cache');
+        sendProgress('Loading from cache...', 50);
         
-        if (tripStopTimes) {
-          for (let j = 0; j < tripStopTimes.length; j++) {
-            const stopId = tripStopTimes[j].stop_id;
-            if (stopId && !seenStops.has(stopId)) {
-              seenStops.add(stopId);
-              
-              // Initialize array if needed and add route info
-              if (!stopToRoutes[stopId]) {
-                stopToRoutes[stopId] = [routeInfo];
-              } else {
-                stopToRoutes[stopId].push(routeInfo);
-              }
-            }
-          }
+        if (db) await new Promise((resolve) => db.close(resolve));
+        
+        db = await new Promise((resolve, reject) => {
+          const database = new duckdb.Database(cacheDbPath, duckdb.OPEN_READONLY, (err) => {
+            if (err) reject(err);
+            else resolve(database);
+          });
+        });
+        
+        sendProgress('Complete!', 100);
+        const duration = Date.now() - startTime;
+        
+        return { 
+          success: true, 
+          fromCache: true, 
+          stats: meta.stats,
+          loadTime: duration
+        };
+      } else {
+        console.log('[Cache] STALE - rebuilding');
+        try {
+          fs.unlinkSync(cacheDbPath);
+          fs.unlinkSync(cacheMetaPath);
+        } catch (err) {
+          console.warn('[Cache] Error removing stale cache:', err);
         }
       }
-      
-      // Send progress updates every 100 routes to reduce IPC overhead
-      processedRoutes++;
-      if (processedRoutes % 100 === 0 || processedRoutes === totalRoutes) {
-        const percent = 97 + Math.floor((processedRoutes / totalRoutes) * 2);
-        sendProgress(`Building stop-to-routes index... ${processedRoutes}/${totalRoutes}`, percent);
-      }
-    });
+    }
     
-    const mappingDuration = Date.now() - mappingStartTime;
-    console.log(`[Main] Built stop-to-routes mapping for ${Object.keys(stopToRoutes).length} stops in ${mappingDuration}ms`);
-    
-    // 7. PREPARE FINAL DATA
-    const gtfsData = {
-      routes,
-      trips,
-      stops,
-      stopsIndex,
-      tripsIndex,
-      stopTimesIndex,
-      stopToRoutes, // Add the stop-to-routes mapping
-      calendar,
-      calendarDates,
-      calendarDatesByDateIndex: Array.from(calendarDatesByDateIndex.entries()), // Convert Map to Array for IPC
-      agencies,
-      agenciesIndex,
-      shapesIndex
-    };
-    
-    sendProgress('Complete!', 100);
-    
-    const duration = Date.now() - startTime;
-    console.log(`[Main] GTFS loaded successfully in ${(duration / 1000).toFixed(2)}s`);
-    console.log(`[Main] Stats: ${routes.length} routes, ${trips.length} trips, ${stops.length} stops, ${Object.keys(stopTimesIndex).length} trips with stop_times`);
-    
-    return gtfsData;
+    console.log('[Cache] MISS - building new database');
+    return await buildDatabaseFromZip(filePath, cacheDbPath, cacheMetaPath, fingerprint, sendProgress);
     
   } catch (error) {
     console.error('[Main] Error loading GTFS:', error);
@@ -659,11 +124,140 @@ async function loadGTFSFile(filePath) {
   }
 }
 
-// ════════════════════════════════════════════════════════════════
-// GLOBAL DATA STORE (for IPC queries)
-// ════════════════════════════════════════════════════════════════
-
-let cachedGtfsData = null;
+async function buildDatabaseFromZip(zipPath, dbPath, metaPath, hash, sendProgress) {
+  const startTime = Date.now();
+  const tmpDir = path.join(os.tmpdir(), `gtfs-${Date.now()}`);
+  fs.mkdirSync(tmpDir, { recursive: true });
+  
+  try {
+    sendProgress('Extracting archive...', 5);
+    const zip = new AdmZip(zipPath);
+    zip.extractAllTo(tmpDir, true);
+    
+    sendProgress('Creating database...', 10);
+    
+    // Close existing database connection if any
+    if (db) await new Promise((resolve) => db.close(resolve));
+    
+    // Remove database file if it exists (from partial/failed previous load)
+    if (fs.existsSync(dbPath)) {
+      try {
+        fs.unlinkSync(dbPath);
+        console.log('[DB] Removed existing database file');
+      } catch (err) {
+        console.warn('[DB] Could not remove existing database file:', err);
+      }
+    }
+    
+    db = await new Promise((resolve, reject) => {
+      const database = new duckdb.Database(dbPath, (err) => {
+        if (err) reject(err);
+        else resolve(database);
+      });
+    });
+    
+    const conn = db.connect();
+    const execAsync = (sql) => new Promise((resolve, reject) => {
+      conn.exec(sql, (err) => {
+        if (err) reject(err);
+        else resolve();
+      });
+    });
+    
+    const tables = [
+      { name: 'agency', required: false, progress: 15 },
+      { name: 'routes', required: true, progress: 20 },
+      { name: 'trips', required: true, progress: 30 },
+      { name: 'stops', required: true, progress: 40 },
+      { name: 'stop_times', required: true, progress: 70 },
+      { name: 'calendar', required: false, progress: 75 },
+      { name: 'calendar_dates', required: false, progress: 80 },
+      { name: 'shapes', required: false, progress: 90 }
+    ];
+    
+    for (const { name, required, progress } of tables) {
+      const csvPath = path.join(tmpDir, `${name}.txt`);
+      
+      if (!fs.existsSync(csvPath)) {
+        if (required) throw new Error(`Missing required file: ${name}.txt`);
+        console.warn(`[DB] Skipping ${name}.txt`);
+        continue;
+      }
+      
+      const fileSizeMB = fs.statSync(csvPath).size / (1024 * 1024);
+      sendProgress(`Loading ${name}.txt (${fileSizeMB.toFixed(1)}MB)...`, progress);
+      
+      const normalizedPath = csvPath.replace(/\\/g, '/');
+      await execAsync(`
+        CREATE TABLE ${name} AS 
+        SELECT * FROM read_csv_auto('${normalizedPath}',
+          header=true,
+          ignore_errors=true,
+          nullstr='',
+          delim=',',
+          quote='"',
+          sample_size=100000,
+          all_varchar=true
+        )
+      `);
+      
+      console.log(`[DB] ✓ Loaded ${name}`);
+    }
+    
+    sendProgress('Building indexes...', 92);
+    await execAsync(`
+      CREATE INDEX IF NOT EXISTS idx_trips_route ON trips(route_id);
+      CREATE INDEX IF NOT EXISTS idx_trips_service ON trips(service_id);
+      CREATE INDEX IF NOT EXISTS idx_stop_times_trip ON stop_times(trip_id);
+      CREATE INDEX IF NOT EXISTS idx_stop_times_trip_seq ON stop_times(trip_id, stop_sequence);
+      CREATE INDEX IF NOT EXISTS idx_calendar_service ON calendar(service_id);
+      CREATE INDEX IF NOT EXISTS idx_calendar_dates_date ON calendar_dates(date);
+    `);
+    
+    await execAsync('VACUUM');
+    
+    sendProgress('Collecting statistics...', 95);
+    const allAsync = (sql) => new Promise((resolve, reject) => {
+      conn.all(sql, (err, rows) => {
+        if (err) reject(err);
+        else resolve(rows);
+      });
+    });
+    
+    const stats = {};
+    try {
+      stats.routes = Number((await allAsync('SELECT COUNT(*) as cnt FROM routes'))[0].cnt);
+      stats.trips = Number((await allAsync('SELECT COUNT(*) as cnt FROM trips'))[0].cnt);
+      stats.stops = Number((await allAsync('SELECT COUNT(*) as cnt FROM stops'))[0].cnt);
+      stats.stopTimes = Number((await allAsync('SELECT COUNT(*) as cnt FROM stop_times'))[0].cnt);
+    } catch (err) {
+      console.warn('[DB] Error collecting stats:', err);
+      stats.routes = stats.trips = stats.stops = stats.stopTimes = 0;
+    }
+    
+    const meta = {
+      sourceFile: zipPath,
+      sourceHash: hash,
+      sourceSize: fs.statSync(zipPath).size,
+      sourceMtime: fs.statSync(zipPath).mtime.toISOString(),
+      createdAt: new Date().toISOString(),
+      stats
+    };
+    fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2));
+    
+    sendProgress('Database loaded, preparing UI...', 95);
+    
+    console.log(`[DB] Built in ${((Date.now() - startTime) / 1000).toFixed(1)}s`);
+    return { success: true, fromCache: false, stats };
+    
+  } finally {
+    try {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    } catch (err) {
+      console.warn('[Cleanup] Error:', err);
+    }
+  }
+}
 
 // ════════════════════════════════════════════════════════════════
 // IPC HANDLERS
@@ -690,10 +284,8 @@ ipcMain.handle('open-file-dialog', async () => {
 // Load GTFS file
 ipcMain.handle('load-gtfs-file', async (event, filePath) => {
   try {
-    const data = await loadGTFSFile(filePath);
-    // Cache the data for IPC queries
-    cachedGtfsData = data;
-    return { success: true, data };
+    const result = await loadGTFSFile(filePath);
+    return result;
   } catch (error) {
     console.error('[Main] GTFS load failed:', error);
     
@@ -714,65 +306,348 @@ ipcMain.handle('load-gtfs-file', async (event, filePath) => {
   }
 });
 
-// Query stop_times for multiple trips in a single batch
-ipcMain.handle('query-stop-times-batch', async (event, tripIds) => {
-  console.log(`[SQL] query-stop-times-batch START for ${tripIds.length} trips`);
-  const startTime = Date.now();
+// Helper function to convert BigInt values to Numbers and handle non-serializable types for IPC
+function convertBigIntsToNumbers(obj) {
+  if (obj === null || obj === undefined) return obj;
+  if (typeof obj === 'bigint') return Number(obj);
+  if (typeof obj === 'function') return undefined;
+  if (typeof obj === 'symbol') return undefined;
   
-  if (!cachedGtfsData || !cachedGtfsData.stopTimesIndex) {
-    console.warn('[SQL] No GTFS data loaded');
-    return {};
+  if (Array.isArray(obj)) return obj.map(convertBigIntsToNumbers);
+  
+  if (typeof obj === 'object') {
+    // Handle special object types
+    if (obj instanceof Date) return obj.toISOString();
+    if (obj instanceof Buffer) return obj.toString('utf8');
+    
+    const result = {};
+    for (const key in obj) {
+      const value = obj[key];
+      // Skip non-serializable values
+      if (typeof value === 'function' || typeof value === 'symbol') continue;
+      result[key] = convertBigIntsToNumbers(value);
+    }
+    return result;
   }
   
-  const result = {};
-  const stopsIndex = cachedGtfsData.stopsIndex || {};
+  return obj;
+}
+
+ipcMain.handle('query-routes', async () => {
+  if (!db) throw new Error('Database not loaded');
   
-  // Fetch all stop_times for requested trips
-  tripIds.forEach(tripId => {
-    const stopTimes = cachedGtfsData.stopTimesIndex[tripId];
-    if (stopTimes && stopTimes.length > 0) {
-      // Enrich with stop information
-      result[tripId] = stopTimes.map(st => ({
-        trip_id: tripId,
-        arrival_time: st.arrival_time,
-        departure_time: st.departure_time,
-        stop_id: st.stop_id,
-        stop_sequence: st.stop_sequence,
-        stop_name: stopsIndex[st.stop_id]?.stop_name || '',
-        stop_lat: stopsIndex[st.stop_id]?.stop_lat || '',
-        stop_lon: stopsIndex[st.stop_id]?.stop_lon || '',
-        pickup_type: st.pickup_type,
-        drop_off_type: st.drop_off_type
-      }));
-    }
-  });
+  const conn = db.connect();
   
-  const duration = Date.now() - startTime;
-  const totalStopTimes = Object.values(result).reduce((sum, arr) => sum + arr.length, 0);
-  console.log(`[SQL] query-stop-times-batch SUCCESS: ${totalStopTimes} stop_times in ${duration}ms`);
-  
-  return result;
+  try {
+    console.log('[SQL] query-routes START');
+    
+    const rows = await new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        console.error('[SQL] query-routes TIMEOUT after 10s');
+        reject(new Error('Query timeout'));
+      }, 10000);
+      
+      conn.all(`
+        SELECT 
+          r.route_id,
+          r.route_short_name,
+          r.route_long_name,
+          r. route_type,
+          r. agency_id,
+          COALESCE(a.agency_name, 'Unknown') as agency_name,
+          COUNT(DISTINCT t.trip_id) as trip_count
+        FROM routes r
+        LEFT JOIN agency a ON r.agency_id = a.agency_id
+        LEFT JOIN trips t ON r.route_id = t.route_id
+        GROUP BY r.route_id, r.route_short_name, r.route_long_name, r.route_type, r.agency_id, a.agency_name
+        ORDER BY r.route_short_name
+      `, (err, rows) => {
+        clearTimeout(timeout);
+        if (err) {
+          console.error('[SQL] query-routes ERROR:', err);
+          reject(err);
+        } else {
+          console.log('[SQL] query-routes SUCCESS:', rows.length, 'rows');
+          resolve(rows);
+        }
+      });
+    });
+    
+    return convertBigIntsToNumbers(rows || []);
+    
+  } catch (err) {
+    console.error('[SQL] query-routes FAILED:', err);
+    throw err;
+  } finally {
+    conn. close();
+    console.log('[SQL] query-routes connection closed');
+  }
+});
+    
+    const columnSet = new Set(columns.map(c => c.column_name.toLowerCase()));
+    
+    // Build SELECT clause with only existing columns
+    const selectClauses = ['r.route_id'];
+    
+    // Required columns (should always exist)
+    if (columnSet.has('route_short_name')) selectClauses.push('ANY_VALUE(r.route_short_name) as route_short_name');
+    if (columnSet.has('route_long_name')) selectClauses.push('ANY_VALUE(r.route_long_name) as route_long_name');
+    if (columnSet.has('route_type')) selectClauses.push('ANY_VALUE(r.route_type) as route_type');
+    
+    // Optional columns
+    if (columnSet.has('agency_id')) selectClauses.push('ANY_VALUE(r.agency_id) as agency_id');
+    if (columnSet.has('route_desc')) selectClauses.push('ANY_VALUE(r.route_desc) as route_desc');
+    if (columnSet.has('route_url')) selectClauses.push('ANY_VALUE(r.route_url) as route_url');
+    if (columnSet.has('route_color')) selectClauses.push('ANY_VALUE(r.route_color) as route_color');
+    if (columnSet.has('route_text_color')) selectClauses.push('ANY_VALUE(r.route_text_color) as route_text_color');
+    
+    selectClauses.push('COALESCE(ANY_VALUE(a.agency_name), \'Unknown\') as agency_name');
+    selectClauses.push('COUNT(DISTINCT t.trip_id) as trip_count');
+    
+    const query = `
+      SELECT ${selectClauses.join(', ')}
+      FROM routes r
+      LEFT JOIN agency a ON r.agency_id = a.agency_id
+      LEFT JOIN trips t ON r.route_id = t.route_id
+      GROUP BY r.route_id
+      ORDER BY ANY_VALUE(r.route_short_name)
+    `;
+    
+    // Execute main query with timeout
+    const rows = await new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('Query timeout')), 10000);
+      conn.all(query, (err, rows) => {
+        clearTimeout(timeout);
+        err ? reject(err) : resolve(rows);
+      });
+    });
+    
+    console.log('[SQL] query-routes SUCCESS:', rows.length, 'rows');
+    return convertBigIntsToNumbers(rows || []);
+    
+  } catch (err) {
+    console.error('[SQL] query-routes FAILED:', err);
+    throw err;
+  } finally {
+    conn.close();
+  }
 });
 
-// Query all stops from the GTFS data
-ipcMain.handle('query-all-stops', async (event) => {
-  console.log('[SQL] query-all-stops START');
-  const startTime = Date.now();
+ipcMain.handle('query-trips', async (event, { routeId, date, directionId }) => {
+  if (!db) throw new Error('Database not loaded');
   
-  if (!cachedGtfsData || !cachedGtfsData.stops) {
-    console.warn('[SQL] No GTFS data loaded');
-    return [];
+  const conn = db.connect();
+  
+  try {
+    console.log('[SQL] query-trips START');
+    
+    const dateObj = new Date(
+      parseInt(date.substring(0, 4)),
+      parseInt(date.substring(4, 6)) - 1,
+      parseInt(date.substring(6, 8))
+    );
+    const dayNames = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+    const dayColumn = dayNames[dateObj.getDay()];
+    
+    // Get columns with timeout
+    const columns = await new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('Query timeout getting columns')), 10000);
+      conn.all(`SELECT column_name FROM information_schema.columns WHERE table_name = 'trips'`, 
+        (err, rows) => {
+          clearTimeout(timeout);
+          err ? reject(err) : resolve(rows);
+        });
+    });
+    
+    const columnSet = new Set(columns.map(c => c.column_name.toLowerCase()));
+    
+    // Build SELECT clause with only existing columns
+    const selectClauses = [];
+    
+    // Required columns
+    if (columnSet.has('route_id')) selectClauses.push('t.route_id');
+    if (columnSet.has('service_id')) selectClauses.push('t.service_id');
+    if (columnSet.has('trip_id')) selectClauses.push('t.trip_id');
+    
+    // Optional columns
+    if (columnSet.has('trip_headsign')) selectClauses.push('t.trip_headsign');
+    if (columnSet.has('trip_short_name')) selectClauses.push('t.trip_short_name');
+    if (columnSet.has('direction_id')) selectClauses.push('t.direction_id');
+    if (columnSet.has('block_id')) selectClauses.push('t.block_id');
+    if (columnSet.has('shape_id')) selectClauses.push('t.shape_id');
+    if (columnSet.has('wheelchair_accessible')) selectClauses.push('t.wheelchair_accessible');
+    if (columnSet.has('bikes_allowed')) selectClauses.push('t.bikes_allowed');
+    
+    selectClauses.push('(SELECT departure_time FROM stop_times WHERE trip_id = t.trip_id ORDER BY CAST(stop_sequence AS INTEGER) ASC LIMIT 1) as first_departure');
+    
+    const query = `
+      WITH active_services AS (
+        SELECT service_id FROM calendar
+        WHERE start_date <= ? AND end_date >= ? AND ${dayColumn} = '1'
+        UNION
+        SELECT service_id FROM calendar_dates WHERE date = ? AND exception_type = '1'
+        EXCEPT
+        SELECT service_id FROM calendar_dates WHERE date = ? AND exception_type = '2'
+      )
+      SELECT ${selectClauses.join(', ')}
+      FROM trips t
+      WHERE t.route_id = ? AND t.direction_id = ? AND t.service_id IN (SELECT service_id FROM active_services)
+      ORDER BY first_departure
+    `;
+    
+    // Execute main query with timeout
+    const rows = await new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('Query timeout')), 10000);
+      conn.all(query, [date, date, date, date, routeId, directionId], (err, rows) => {
+        clearTimeout(timeout);
+        err ? reject(err) : resolve(rows);
+      });
+    });
+    
+    console.log('[SQL] query-trips SUCCESS:', rows.length, 'rows');
+    return convertBigIntsToNumbers(rows || []);
+    
+  } catch (err) {
+    console.error('[SQL] query-trips FAILED:', err);
+    throw err;
+  } finally {
+    conn.close();
   }
+});
+
+ipcMain.handle('query-stop-times', async (event, tripId) => {
+  if (!db) throw new Error('Database not loaded');
   
-  // Return all stops, sorted by name
-  const allStops = [...cachedGtfsData.stops].sort((a, b) => 
-    (a.stop_name || '').localeCompare(b.stop_name || '')
-  );
+  const conn = db.connect();
   
-  const duration = Date.now() - startTime;
-  console.log(`[SQL] query-all-stops SUCCESS: ${allStops.length} stops in ${duration}ms`);
+  try {
+    console.log('[SQL] query-stop-times START');
+    
+    // Get columns with timeout
+    const columns = await new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('Query timeout getting columns')), 10000);
+      conn.all(`SELECT column_name FROM information_schema.columns WHERE table_name = 'stop_times'`, 
+        (err, rows) => {
+          clearTimeout(timeout);
+          err ? reject(err) : resolve(rows);
+        });
+    });
+    
+    const columnSet = new Set(columns.map(c => c.column_name.toLowerCase()));
+    
+    // Build SELECT clause with only existing columns
+    const selectClauses = [];
+    
+    // Required columns
+    if (columnSet.has('trip_id')) selectClauses.push('st.trip_id');
+    if (columnSet.has('arrival_time')) selectClauses.push('st.arrival_time');
+    if (columnSet.has('departure_time')) selectClauses.push('st.departure_time');
+    if (columnSet.has('stop_id')) selectClauses.push('st.stop_id');
+    if (columnSet.has('stop_sequence')) selectClauses.push('st.stop_sequence');
+    
+    // Optional columns
+    if (columnSet.has('stop_headsign')) selectClauses.push('st.stop_headsign');
+    if (columnSet.has('pickup_type')) selectClauses.push('st.pickup_type');
+    if (columnSet.has('drop_off_type')) selectClauses.push('st.drop_off_type');
+    if (columnSet.has('shape_dist_traveled')) selectClauses.push('st.shape_dist_traveled');
+    if (columnSet.has('timepoint')) selectClauses.push('st.timepoint');
+    
+    // Add stop info
+    selectClauses.push('s.stop_name', 's.stop_lat', 's.stop_lon');
+    
+    const query = `
+      SELECT ${selectClauses.join(', ')}
+      FROM stop_times st
+      JOIN stops s ON st.stop_id = s.stop_id
+      WHERE st.trip_id = ?
+      ORDER BY CAST(st.stop_sequence AS INTEGER)
+    `;
+    
+    // Execute query with timeout
+    const rows = await new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('Query timeout')), 10000);
+      conn.all(query, [tripId], (err, rows) => {
+        clearTimeout(timeout);
+        err ? reject(err) : resolve(rows);
+      });
+    });
+    
+    console.log('[SQL] query-stop-times SUCCESS:', rows.length, 'rows');
+    return convertBigIntsToNumbers(rows || []);
+    
+  } catch (err) {
+    console.error('[SQL] query-stop-times FAILED:', err);
+    throw err;
+  } finally {
+    conn.close();
+  }
+});
+
+ipcMain.handle('query-shape', async (event, shapeId) => {
+  if (!db) throw new Error('Database not loaded');
   
-  return allStops;
+  const conn = db.connect();
+  
+  try {
+    console.log('[SQL] query-shape START');
+    
+    const rows = await new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('Query timeout')), 10000);
+      conn.all(`
+        SELECT shape_pt_lat, shape_pt_lon FROM shapes WHERE shape_id = ? ORDER BY CAST(shape_pt_sequence AS INTEGER)
+      `, [shapeId], (err, rows) => {
+        clearTimeout(timeout);
+        err ? reject(err) : resolve(rows);
+      });
+    });
+    
+    console.log('[SQL] query-shape SUCCESS:', rows.length, 'points');
+    const converted = convertBigIntsToNumbers(rows || []);
+    return converted.map(r => [r.shape_pt_lat, r.shape_pt_lon]);
+    
+  } catch (err) {
+    console.error('[SQL] query-shape FAILED:', err);
+    throw err;
+  } finally {
+    conn.close();
+  }
+});
+ipcMain.handle('query-available-dates', async () => {
+  if (!db) throw new Error('Database not loaded');
+  
+  const conn = db.connect();
+  
+  try {
+    console. log('[SQL] query-available-dates START');
+    
+    const rows = await new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        console.error('[SQL] query-available-dates TIMEOUT');
+        reject(new Error('Query timeout'));
+      }, 10000);
+      
+      conn.all(`SELECT DISTINCT start_date, end_date FROM calendar ORDER BY start_date`, 
+        (err, rows) => {
+          clearTimeout(timeout);
+          if (err) {
+            console.error('[SQL] query-available-dates ERROR:', err);
+            reject(err);
+          } else {
+            console.log('[SQL] query-available-dates SUCCESS:', rows.length, 'rows');
+            resolve(rows);
+          }
+        });
+    });
+    
+    return convertBigIntsToNumbers(rows || []);
+    
+  } catch (err) {
+    console.error('[SQL] query-available-dates FAILED:', err);
+    throw err;
+  } finally {
+    conn.close();
+    console.log('[SQL] query-available-dates connection closed');
+  }
 });
 
 // ════════════════════════════════════════════════════════════════
@@ -791,4 +666,9 @@ app.on('activate', () => {
   if (BrowserWindow.getAllWindows().length === 0) {
     createWindow();
   }
+});
+
+app.on('quit', async () => {
+  if (db) await new Promise((resolve) => db.close(resolve));
+
 });
