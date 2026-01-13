@@ -212,10 +212,10 @@ async function buildDatabaseFromZip(zipPath, dbPath, metaPath, hash, sendProgres
     
     const stats = {};
     try {
-      stats.routes = (await allAsync('SELECT COUNT(*) as cnt FROM routes'))[0].cnt;
-      stats.trips = (await allAsync('SELECT COUNT(*) as cnt FROM trips'))[0].cnt;
-      stats.stops = (await allAsync('SELECT COUNT(*) as cnt FROM stops'))[0].cnt;
-      stats.stopTimes = (await allAsync('SELECT COUNT(*) as cnt FROM stop_times'))[0].cnt;
+      stats.routes = Number((await allAsync('SELECT COUNT(*) as cnt FROM routes'))[0].cnt);
+      stats.trips = Number((await allAsync('SELECT COUNT(*) as cnt FROM trips'))[0].cnt);
+      stats.stops = Number((await allAsync('SELECT COUNT(*) as cnt FROM stops'))[0].cnt);
+      stats.stopTimes = Number((await allAsync('SELECT COUNT(*) as cnt FROM stop_times'))[0].cnt);
     } catch (err) {
       console.warn('[DB] Error collecting stats:', err);
       stats.routes = stats.trips = stats.stops = stats.stopTimes = 0;
@@ -292,6 +292,21 @@ ipcMain.handle('load-gtfs-file', async (event, filePath) => {
   }
 });
 
+// Helper function to convert BigInt values to Numbers for IPC serialization
+function convertBigIntsToNumbers(obj) {
+  if (obj === null || obj === undefined) return obj;
+  if (typeof obj === 'bigint') return Number(obj);
+  if (Array.isArray(obj)) return obj.map(convertBigIntsToNumbers);
+  if (typeof obj === 'object') {
+    const result = {};
+    for (const key in obj) {
+      result[key] = convertBigIntsToNumbers(obj[key]);
+    }
+    return result;
+  }
+  return obj;
+}
+
 ipcMain.handle('query-routes', async () => {
   if (!db) throw new Error('Database not loaded');
   return new Promise((resolve, reject) => {
@@ -306,7 +321,10 @@ ipcMain.handle('query-routes', async () => {
       LEFT JOIN trips t ON r.route_id = t.route_id
       GROUP BY r.route_id
       ORDER BY r.route_short_name
-    `, (err, rows) => err ? reject(err) : resolve(rows || []));
+    `, (err, rows) => {
+      if (err) return reject(err);
+      resolve(convertBigIntsToNumbers(rows || []));
+    });
   });
 });
 
@@ -336,7 +354,10 @@ ipcMain.handle('query-trips', async (event, { routeId, date, directionId }) => {
       FROM trips t
       WHERE t.route_id = ? AND t.direction_id = ? AND t.service_id IN (SELECT service_id FROM active_services)
       ORDER BY first_departure
-    `, [date, date, date, date, routeId, directionId], (err, rows) => err ? reject(err) : resolve(rows || []));
+    `, [date, date, date, date, routeId, directionId], (err, rows) => {
+      if (err) return reject(err);
+      resolve(convertBigIntsToNumbers(rows || []));
+    });
   });
 });
 
@@ -350,7 +371,10 @@ ipcMain.handle('query-stop-times', async (event, tripId) => {
       JOIN stops s ON st.stop_id = s.stop_id
       WHERE st.trip_id = ?
       ORDER BY st.stop_sequence
-    `, [tripId], (err, rows) => err ? reject(err) : resolve(rows || []));
+    `, [tripId], (err, rows) => {
+      if (err) return reject(err);
+      resolve(convertBigIntsToNumbers(rows || []));
+    });
   });
 });
 
@@ -360,7 +384,11 @@ ipcMain.handle('query-shape', async (event, shapeId) => {
     const conn = db.connect();
     conn.all(`
       SELECT shape_pt_lat, shape_pt_lon FROM shapes WHERE shape_id = ? ORDER BY shape_pt_sequence
-    `, [shapeId], (err, rows) => err ? reject(err) : resolve((rows || []).map(r => [r.shape_pt_lat, r.shape_pt_lon])));
+    `, [shapeId], (err, rows) => {
+      if (err) return reject(err);
+      const converted = convertBigIntsToNumbers(rows || []);
+      resolve(converted.map(r => [r.shape_pt_lat, r.shape_pt_lon]));
+    });
   });
 });
 
@@ -369,7 +397,10 @@ ipcMain.handle('query-available-dates', async () => {
   return new Promise((resolve, reject) => {
     const conn = db.connect();
     conn.all(`SELECT DISTINCT start_date, end_date FROM calendar ORDER BY start_date`, 
-      (err, rows) => err ? reject(err) : resolve(rows || []));
+      (err, rows) => {
+        if (err) return reject(err);
+        resolve(convertBigIntsToNumbers(rows || []));
+      });
   });
 });
 
