@@ -563,47 +563,70 @@ async function loadGTFSFile(filePath) {
       calendarDatesByDateIndex.get(cd.date).push(cd);
     });
     
-    // 6.5 BUILD STOP-TO-ROUTES MAPPING
+    // 6.5 BUILD STOP-TO-ROUTES MAPPING (optimized algorithm)
     // This helps the renderer show all stops with their serving routes
     // without needing to load all stop_times into memory
     sendProgress('Building stop-to-routes index...', 97);
     console.log('[Main] Building stop-to-routes index...');
+    const mappingStartTime = Date.now();
     
     const stopToRoutes = {};
+    const totalRoutes = routes.length;
+    let processedRoutes = 0;
     
-    // For each route, find all stops it serves
+    // Build route info lookup once (avoid repeated object creation)
+    const routeInfoMap = {};
     routes.forEach(route => {
-      const routeTrips = tripsIndex[route.route_id] || [];
-      const routeStops = new Set();
-      
-      // Collect all stops from this route's trips
-      routeTrips.forEach(trip => {
-        const tripStopTimes = stopTimesIndex[trip.trip_id] || [];
-        tripStopTimes.forEach(st => {
-          if (st.stop_id) {
-            routeStops.add(st.stop_id);
-          }
-        });
-      });
-      
-      // Add this route to each stop's route list
-      routeStops.forEach(stopId => {
-        if (!stopToRoutes[stopId]) {
-          stopToRoutes[stopId] = [];
-        }
-        // Store minimal route info to reduce data size
-        stopToRoutes[stopId].push({
-          route_id: route.route_id,
-          route_short_name: route.route_short_name,
-          route_long_name: route.route_long_name,
-          route_type: route.route_type,
-          route_color: route.route_color,
-          route_text_color: route.route_text_color
-        });
-      });
+      routeInfoMap[route.route_id] = {
+        route_id: route.route_id,
+        route_short_name: route.route_short_name,
+        route_long_name: route.route_long_name,
+        route_type: route.route_type,
+        route_color: route.route_color,
+        route_text_color: route.route_text_color
+      };
     });
     
-    console.log(`[Main] Built stop-to-routes mapping for ${Object.keys(stopToRoutes).length} stops`);
+    // For each route, find all stops it serves (optimized with single pass)
+    routes.forEach((route, index) => {
+      const routeTrips = tripsIndex[route.route_id] || [];
+      const routeInfo = routeInfoMap[route.route_id];
+      
+      // Use Set for O(1) lookups instead of array searches
+      const seenStops = new Set();
+      
+      // Single pass through all trips for this route
+      for (let i = 0; i < routeTrips.length; i++) {
+        const trip = routeTrips[i];
+        const tripStopTimes = stopTimesIndex[trip.trip_id];
+        
+        if (tripStopTimes) {
+          for (let j = 0; j < tripStopTimes.length; j++) {
+            const stopId = tripStopTimes[j].stop_id;
+            if (stopId && !seenStops.has(stopId)) {
+              seenStops.add(stopId);
+              
+              // Initialize array if needed and add route info
+              if (!stopToRoutes[stopId]) {
+                stopToRoutes[stopId] = [routeInfo];
+              } else {
+                stopToRoutes[stopId].push(routeInfo);
+              }
+            }
+          }
+        }
+      }
+      
+      // Send progress updates every 100 routes to reduce IPC overhead
+      processedRoutes++;
+      if (processedRoutes % 100 === 0 || processedRoutes === totalRoutes) {
+        const percent = 97 + Math.floor((processedRoutes / totalRoutes) * 2);
+        sendProgress(`Building stop-to-routes index... ${processedRoutes}/${totalRoutes}`, percent);
+      }
+    });
+    
+    const mappingDuration = Date.now() - mappingStartTime;
+    console.log(`[Main] Built stop-to-routes mapping for ${Object.keys(stopToRoutes).length} stops in ${mappingDuration}ms`);
     
     // 7. PREPARE FINAL DATA
     const gtfsData = {
