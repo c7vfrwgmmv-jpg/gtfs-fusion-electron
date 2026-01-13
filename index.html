@@ -2015,8 +2015,12 @@ async function handleFileUpload(e) {
     
     // Clear caches
     stationNameToIdCache = null;
-    clearStopsSearchIndex();
-    clearStopToRoutesCache();
+    // Only clear stops-related caches if we have data to clear
+    // These will be rebuilt on-demand when user navigates to stops view
+    if (Object.keys(state.gtfsData.stopsIndex || {}).length > 0) {
+      clearStopsSearchIndex();
+      clearStopToRoutesCache();
+    }
     cachedGroupsArray = null;
     lastStopsDataHash = null;
     state.routeProfiles = {};
@@ -4497,7 +4501,9 @@ const ROUTES_INITIAL_BATCH = 100; // Pierwsza partia - to co widać na ekranie
 async function renderRouteTable() {
   const container = $('routes-tbody');
   if (!container || !state.gtfsData) return;
-  container.innerHTML = '';
+  
+  // Show loading indicator while routes are being rendered
+  container.innerHTML = '<div class="p-4 text-center text-gray-600">Ładowanie tras...</div>';
 
   const logicalRoutes = state.gtfsData.logicalRoutes || [];
   const baseRoutes = (state.gtfsData.routes || []).slice();
@@ -5113,6 +5119,12 @@ async function renderStopsView() {
   const stopsList = $('stops-list');
   const stopsMap = $('stops-map');
   if (!stopsList || !stopsMap) return;
+  
+  // Safety check: if indexes are empty (not yet populated), show a message
+  if (!state.gtfsData.stopsIndex || Object.keys(state.gtfsData.stopsIndex).length === 0) {
+    stopsList.innerHTML = '<div class="p-4 text-center text-gray-600">Dane przystanków nie są jeszcze załadowane. Wybierz trasę aby załadować dane.</div>';
+    return;
+  }
   
   // Show loading indicator for initial data preparation
   const isInitialLoad = !cachedStopToRoutesMap;
@@ -7342,7 +7354,11 @@ $('date-select')?.addEventListener('change', async (e) => {
   });
 
 if (state.gtfsData && !state.selectedRoute && !state.showStopsView) {
-  renderRouteTable();
+  // Defer route table rendering to avoid blocking UI on initial load
+  // Use requestAnimationFrame to allow the main render to complete first
+  requestAnimationFrame(() => {
+    renderRouteTable();
+  });
   // Restore scroll position after rendering routes list
   if (state.routesListScrollPosition !== undefined && state.routesListScrollPosition > 0) {
     setTimeout(() => {
