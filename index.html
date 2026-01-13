@@ -6596,16 +6596,6 @@ async function openStopTimetable(stopId) {
   const stop = state.gtfsData.stopsIndex[stopId];
   if (!stop) return;
 
-  // Show loading state in modal
-  const modal = document.getElementById('stop-timetable-modal');
-  if (modal) {
-    const modalContent = modal.querySelector('.modal-content-area');
-    if (modalContent) {
-      modalContent.innerHTML = '<div class="p-4 text-center">Ładowanie rozkładu...</div>';
-    }
-    modal.classList.remove('hidden');
-  }
-
   // Collect departures at this stop
   // Get active services for selected date
   const activeServices = getServicesForDate(state.selectedDate);
