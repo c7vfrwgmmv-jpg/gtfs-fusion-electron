@@ -2136,29 +2136,93 @@ async function loadAvailableDates() {
     
     console.log('[App] loadAvailableDates SUCCESS - got', ranges.length, 'ranges');
     
+    // ✅ Define reasonable date window:  1 year back, 3 months forward
+    const today = new Date();
+    const oneYearAgo = new Date(today);
+    oneYearAgo.setFullYear(today.getFullYear() - 1);
+    const threeMonthsForward = new Date(today);
+    threeMonthsForward.setMonth(today.getMonth() + 3);
+    
+    // Convert to YYYYMMDD format for comparison
+    const minDate = oneYearAgo.toISOString().substring(0, 10).replace(/-/g, '');
+    const maxDate = threeMonthsForward.toISOString().substring(0, 10).replace(/-/g, '');
+    const todayStr = today.toISOString().substring(0, 10).replace(/-/g, '');
+    
+    console.log('[App] Date window:', minDate, 'to', maxDate);
+    
     const dates = new Set();
-    ranges.forEach(r => {
+    
+    for (const r of ranges) {
       let cur = String(r.start_date || '');
       const endDate = String(r.end_date || '');
       
-      if (!cur || cur.length !== 8 || !endDate || endDate. length !== 8) return;
+      if (! cur || cur.length !== 8 || !endDate || endDate.length !== 8) continue;
       
-      while (cur <= endDate) {
-        dates.add(cur);
-        const d = new Date(
-          parseInt(cur.substring(0, 4)),
-          parseInt(cur.substring(4, 6)) - 1,
-          parseInt(cur.substring(6, 8))
-        );
-        d.setDate(d.getDate() + 1);
-        cur = d.toISOString().substring(0, 10).replace(/-/g, '');
+      // ✅ Clamp range to our window
+      if (cur < minDate) cur = minDate;
+      if (endDate > maxDate) {
+        // Only process up to maxDate
+        let clampedEnd = maxDate;
+        
+        let iterationCount = 0;
+        while (cur <= clampedEnd) {
+          dates.add(cur);
+          
+          // Optimized date increment
+          const year = parseInt(cur.substring(0, 4), 10);
+          const month = parseInt(cur.substring(4, 6), 10) - 1;
+          const day = parseInt(cur.substring(6, 8), 10);
+          
+          const d = new Date(year, month, day);
+          d.setDate(d.getDate() + 1);
+          
+          const nextYear = d.getFullYear();
+          const nextMonth = String(d.getMonth() + 1).padStart(2, '0');
+          const nextDay = String(d.getDate()).padStart(2, '0');
+          cur = `${nextYear}${nextMonth}${nextDay}`;
+          
+          iterationCount++;
+          
+          // Yield every 100 dates
+          if (iterationCount % 100 === 0) {
+            await new Promise(resolve => setTimeout(resolve, 0));
+          }
+        }
+      } else if (endDate >= minDate) {
+        // Range is within our window
+        let iterationCount = 0;
+        while (cur <= endDate) {
+          dates.add(cur);
+          
+          const year = parseInt(cur.substring(0, 4), 10);
+          const month = parseInt(cur.substring(4, 6), 10) - 1;
+          const day = parseInt(cur.substring(6, 8), 10);
+          
+          const d = new Date(year, month, day);
+          d.setDate(d. getDate() + 1);
+          
+          const nextYear = d.getFullYear();
+          const nextMonth = String(d.getMonth() + 1).padStart(2, '0');
+          const nextDay = String(d. getDate()).padStart(2, '0');
+          cur = `${nextYear}${nextMonth}${nextDay}`;
+          
+          iterationCount++;
+          
+          if (iterationCount % 100 === 0) {
+            await new Promise(resolve => setTimeout(resolve, 0));
+          }
+        }
       }
-    });
+      // If range is completely outside our window, skip it
+    }
     
     const availableDatesArray = Array.from(dates).sort();
-    state.availableDates = availableDatesArray. map(d => ({ value: d, label: formatDateLabel(d) }));
-    const today = new Date().toISOString().substring(0, 10).replace(/-/g, '');
-    state.selectedDate = dates.has(today) ? today : availableDatesArray[0];
+    state.availableDates = availableDatesArray.map(d => ({ value: d, label: formatDateLabel(d) }));
+    
+    // Select today if available, otherwise closest date
+    state.selectedDate = dates.has(todayStr) ? todayStr : availableDatesArray[0] || '';
+    
+    console.log('[App] loadAvailableDates COMPLETE - generated', availableDatesArray.length, 'dates (filtered to', minDate, '-', maxDate, ')');
     
   } catch (err) {
     console.error('[App] loadAvailableDates FAILED:', err);
