@@ -4602,15 +4602,34 @@ const ROUTES_RENDER_BATCH_SIZE = 50; // Renderuj po 50 tras na raz
 const ROUTES_INITIAL_BATCH = 100; // Pierwsza partia - to co widać na ekranie
 
 // ✅ Zmień renderRouteTable() na asynchroniczną
-async function renderRouteTable() {
-  const container = $('routes-tbody');
-  if (!container || !state.gtfsData) return;
+function renderRouteTable() {
+  console.log('[ROUTE_TABLE] Starting renderRouteTable()');
+  console.time('ROUTE_TABLE_TOTAL');
   
-  // Show loading indicator while routes are being rendered
-  container.innerHTML = '<div class="p-4 text-center text-gray-600">Ładowanie tras...</div>';
+  const container = $('routes-tbody');
+  if (!container) {
+    console.error('[ROUTE_TABLE] Container not found! ');
+    return;
+  }
+  
+  if (!state.gtfsData) {
+    console.error('[ROUTE_TABLE] No gtfsData! ');
+    return;
+  }
+  
+  console.log('[ROUTE_TABLE] state.gtfsData:', state.gtfsData);
+  console.log('[ROUTE_TABLE] logicalRoutes:', state.gtfsData.logicalRoutes);
+  console.log('[ROUTE_TABLE] routes:', state.gtfsData. routes?. length);
+  console.log('[ROUTE_TABLE] routeGroupMode:', state.routeGroupMode);
+  
+  container.innerHTML = '';
 
   const logicalRoutes = state.gtfsData.logicalRoutes || [];
   const baseRoutes = (state.gtfsData.routes || []).slice();
+  
+  console.log('[ROUTE_TABLE] logicalRoutes type:', typeof logicalRoutes);
+  console.log('[ROUTE_TABLE] logicalRoutes is Array? ', Array.isArray(logicalRoutes));
+  console.log('[ROUTE_TABLE] baseRoutes length:', baseRoutes.length);
 
   function reprOf(group) {
     return (group && group.members && group.members[0]) || null;
