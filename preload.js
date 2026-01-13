@@ -16,6 +16,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Query all stops
   queryAllStops: () => ipcRenderer.invoke('query-all-stops'),
   
+  // Query departures for a specific stop
+  queryStopDepartures: (params) => ipcRenderer.invoke('query-stop-departures', params),
+  
   // Listen to load progress updates
   onLoadProgress: (callback) => {
     const subscription = (event, data) => callback(data);

@@ -775,6 +775,109 @@ ipcMain.handle('query-all-stops', async (event) => {
   return allStops;
 });
 
+// Query departures for a specific stop
+ipcMain.handle('query-stop-departures', async (event, { stopId, date }) => {
+  console.log('[SQL] query-stop-departures START for stop:', stopId, 'date:', date);
+  const startTime = Date.now();
+  
+  if (!cachedGtfsData) {
+    console.warn('[SQL] No GTFS data loaded');
+    return [];
+  }
+  
+  try {
+    // Parse date to get day of week
+    const dateObj = new Date(
+      parseInt(date.substring(0, 4)),
+      parseInt(date.substring(4, 6)) - 1,
+      parseInt(date.substring(6, 8))
+    );
+    const dayNames = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+    const dayColumn = dayNames[dateObj.getDay()];
+    
+    // Find active services for the date
+    const activeServices = new Set();
+    
+    // Check calendar for regular service
+    if (cachedGtfsData.calendar) {
+      cachedGtfsData.calendar.forEach(cal => {
+        if (cal.start_date <= date && cal.end_date >= date && cal[dayColumn] === '1') {
+          activeServices.add(cal.service_id);
+        }
+      });
+    }
+    
+    // Check calendar_dates for additions
+    if (cachedGtfsData.calendarDates) {
+      cachedGtfsData.calendarDates.forEach(cd => {
+        if (cd.date === date) {
+          if (cd.exception_type === '1') {
+            activeServices.add(cd.service_id);
+          } else if (cd.exception_type === '2') {
+            activeServices.delete(cd.service_id);
+          }
+        }
+      });
+    }
+    
+    const departures = [];
+    const seenTrips = new Set();
+    
+    // Find all trips that serve this stop and are active on the given date
+    cachedGtfsData.routes.forEach(route => {
+      const trips = cachedGtfsData.tripsIndex[route.route_id] || [];
+      
+      trips.forEach(trip => {
+        // Skip if trip is not active on this date
+        if (!activeServices.has(trip.service_id)) return;
+        
+        // Skip if we already processed this trip
+        if (seenTrips.has(trip.trip_id)) return;
+        
+        // Get stop_times for this trip
+        const stopTimes = cachedGtfsData.stopTimesIndex[trip.trip_id] || [];
+        
+        // Find the stop_time for our stop
+        const stopTime = stopTimes.find(st => st.stop_id === stopId);
+        
+        if (stopTime) {
+          seenTrips.add(trip.trip_id);
+          const departureTime = stopTime.departure_time || stopTime.arrival_time;
+          
+          if (departureTime) {
+            departures.push({
+              route_id: route.route_id,
+              route_short_name: route.route_short_name || '',
+              route_long_name: route.route_long_name || '',
+              trip_headsign: trip.trip_headsign || '',
+              departure_time: departureTime
+            });
+          }
+        }
+      });
+    });
+    
+    // Sort by departure time
+    departures.sort((a, b) => {
+      const timeA = a.departure_time || '';
+      const timeB = b.departure_time || '';
+      return timeA.localeCompare(timeB);
+    });
+    
+    // Limit to 50 departures
+    const limitedDepartures = departures.slice(0, 50);
+    
+    const duration = Date.now() - startTime;
+    console.log(`[SQL] query-stop-departures SUCCESS: ${limitedDepartures.length} departures in ${duration}ms`);
+    
+    return limitedDepartures;
+    
+  } catch (err) {
+    console.error('[SQL] query-stop-departures FAILED:', err);
+    throw err;
+  }
+});
+
 // ════════════════════════════════════════════════════════════════
 // APP LIFECYCLE
 // ════════════════════════════════════════════════════════════════
