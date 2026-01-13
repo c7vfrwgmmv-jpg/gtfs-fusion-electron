@@ -3989,6 +3989,40 @@ function getAvailableDirections() {
   return result;
 }
 
+// Simple fallback to get basic direction info without needing stop times
+function getBasicDirections() {
+  if (!state.selectedRoute || !state.gtfsData) return [];
+  
+  let routeIds = [state.selectedRoute.route_id];
+  if (state.selectedRouteGroup && Array.isArray(state.selectedRouteGroup.members)) {
+    routeIds = state.selectedRouteGroup.members
+      .map(r => r.route_id)
+      .filter(Boolean);
+  }
+  
+  let routeTripsAll = [];
+  routeIds.forEach(rid => {
+    const arr = state.gtfsData.tripsIndex[rid] || [];
+    routeTripsAll = routeTripsAll.concat(arr);
+  });
+  
+  // Group by direction_id
+  const dirMap = new Map();
+  for (const t of routeTripsAll) {
+    const dirId = String(t.direction_id === undefined || t.direction_id === null ? '0' : t.direction_id);
+    if (!dirMap.has(dirId)) {
+      dirMap.set(dirId, {
+        id: dirId,
+        name: `Direction ${dirId}`,
+        trips: []
+      });
+    }
+    dirMap.get(dirId).trips.push(t);
+  }
+  
+  return Array.from(dirMap.values());
+}
+
 function applyDirectionHeuristic(perDir, absDiff = 1, relRatio = 0.30) {
   const num = v => (typeof v === 'number' && !Number.isNaN(v)) ? v : 0;
   function closeEnough(x, y, absD, relR) {
@@ -7038,7 +7072,17 @@ case VIEW.LOADING:
 
   case VIEW.ROUTE_TIMETABLE:
     // ========== WIDOK LINII z rozkładem ==========
-    const directions = getAvailableDirections();
+    let directions = getAvailableDirections();
+    
+    // Fallback: if getAvailableDirections fails to detect multiple directions 
+    // (e.g., because stop times aren't loaded yet), use basic direction detection
+    if (directions.length <= 1) {
+      const basicDirs = getBasicDirections();
+      if (basicDirs.length > 1) {
+        directions = basicDirs;
+      }
+    }
+    
     const dirA = Array.isArray(directions) && directions.length >= 1 ? directions[0] : null;
     const dirB = Array.isArray(directions) && directions.length >= 2 ? directions[1] : null;
     const displayA = dirA ? (dirA.fullName || dirA.name || '') : '';
