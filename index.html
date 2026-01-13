@@ -2018,6 +2018,20 @@ async function handleFileUpload(e) {
     console.timeEnd('LOAD_DATES');
     console.log('[PERF] Dates loaded:', state.availableDates?. length);
     
+    // Load all stops from database (Bug #3 fix)
+    console.log('[PERF] Loading all stops...');
+    console.time('LOAD_STOPS');
+    await loadAllStops();
+    console.timeEnd('LOAD_STOPS');
+    console.log('[PERF] Stops loaded:', Object.keys(state.gtfsData.stopsIndex || {}).length);
+    
+    // Load all trips from database (Bug #4 fix)
+    console.log('[PERF] Loading all trips...');
+    console.time('LOAD_TRIPS');
+    await loadAllTrips();
+    console.timeEnd('LOAD_TRIPS');
+    console.log('[PERF] Trips loaded:', Object.keys(state.gtfsData.tripsIndex || {}).length);
+    
     // Build agenciesIndex from loaded routes
     console.log('[PERF] Building agencies index...');
     console.time('BUILD_AGENCIES');
@@ -2245,6 +2259,99 @@ async function loadAvailableDates() {
   } catch (err) {
     console.error('[App] loadAvailableDates FAILED:', err);
     throw new Error('Failed to load dates: ' + err.message);
+  }
+}
+
+async function loadAllStops() {
+  console.log('[App] loadAllStops START');
+  
+  const timeoutPromise = new Promise((_, reject) => 
+    setTimeout(() => {
+      console.error('[App] loadAllStops TIMEOUT after 30s');
+      reject(new Error('Timeout loading stops from database'));
+    }, 30000)
+  );
+  
+  try {
+    const stops = await Promise.race([
+      window.electronAPI.queryAllStops(),
+      timeoutPromise
+    ]);
+    
+    console.log('[App] loadAllStops SUCCESS - got', stops.length, 'stops');
+    
+    // Build stopsIndex
+    state.gtfsData.stopsIndex = {};
+    stops.forEach(stop => {
+      state.gtfsData.stopsIndex[stop.stop_id] = stop;
+    });
+    
+    console.log('[App] loadAllStops COMPLETE - indexed', Object.keys(state.gtfsData.stopsIndex).length, 'stops');
+    
+  } catch (err) {
+    console.error('[App] loadAllStops FAILED:', err);
+    throw new Error('Failed to load stops: ' + err.message);
+  }
+}
+
+async function loadAllTrips() {
+  console.log('[App] loadAllTrips START');
+  
+  const timeoutPromise = new Promise((_, reject) => 
+    setTimeout(() => {
+      console.error('[App] loadAllTrips TIMEOUT after 30s');
+      reject(new Error('Timeout loading trips from database'));
+    }, 30000)
+  );
+  
+  try {
+    const trips = await Promise.race([
+      window.electronAPI.queryAllTrips(),
+      timeoutPromise
+    ]);
+    
+    console.log('[App] loadAllTrips SUCCESS - got', trips.length, 'trips');
+    
+    // Build tripsIndex grouped by route_id
+    state.gtfsData.tripsIndex = {};
+    trips.forEach(trip => {
+      if (!state.gtfsData.tripsIndex[trip.route_id]) {
+        state.gtfsData.tripsIndex[trip.route_id] = [];
+      }
+      state.gtfsData.tripsIndex[trip.route_id].push(trip);
+    });
+    
+    console.log('[App] loadAllTrips COMPLETE - indexed', trips.length, 'trips across', Object.keys(state.gtfsData.tripsIndex).length, 'routes');
+    
+  } catch (err) {
+    console.error('[App] loadAllTrips FAILED:', err);
+    throw new Error('Failed to load trips: ' + err.message);
+  }
+}
+
+// Pre-load stop times data for STOP_DETAIL view
+async function prepareStopDetailData(stop, selectedDate) {
+  if (!stop || !selectedDate || !state.gtfsData) return;
+  
+  const activeServices = getServicesForDate(selectedDate);
+  const activeServicesSet = new Set(activeServices);
+  
+  // Collect all trips that might stop at this stop
+  const tripsToLoad = [];
+  state.gtfsData.routes.forEach(route => {
+    const trips = state.gtfsData.tripsIndex[route.route_id] || [];
+    trips.forEach(trip => {
+      if (activeServicesSet.has(trip.service_id)) {
+        tripsToLoad.push(trip.trip_id);
+      }
+    });
+  });
+  
+  // Load stop_times in batches
+  const BATCH_SIZE = 100;
+  for (let i = 0; i < tripsToLoad.length; i += BATCH_SIZE) {
+    const batch = tripsToLoad.slice(i, Math.min(i + BATCH_SIZE, tripsToLoad.length));
+    await Promise.all(batch.map(tripId => ensureStopTimesLoaded(tripId)));
   }
 }
 
@@ -5330,7 +5437,7 @@ async function renderStopsView() {
   
   // Safety check: if indexes are empty (not yet populated), show a message
   if (!state.gtfsData.stopsIndex || Object.keys(state.gtfsData.stopsIndex).length === 0) {
-    stopsList.innerHTML = '<div class="p-4 text-center text-gray-600">Dane przystanków nie są jeszcze załadowane. Wybierz trasę aby załadować dane.</div>';
+    stopsList.innerHTML = '<div class="p-4 text-center text-gray-600">Dane przystanków nie są jeszcze załadowane.</div>';
     return;
   }
   
@@ -5352,13 +5459,12 @@ async function renderStopsView() {
   const stopsData = [];
   Object.values(state.gtfsData.stopsIndex).forEach(stop => {
     const routes = stopToRoutes.get(stop.stop_id) || [];
-    if (routes.length > 0) {
-      stopsData.push({
-        ...stop,
-        routeCount: routes.length,
-        routes: routes
-      });
-    }
+    // Show ALL stops, even those without routes (Bug #3 fix)
+    stopsData.push({
+      ...stop,
+      routeCount: routes.length,
+      routes: routes
+    });
   });
   
   // Sortuj alfabetycznie
@@ -5574,10 +5680,14 @@ async function renderStopsView() {
         // State 1: Lista pokazuje grupy - popup z klikalnym linkiem
         marker.bindPopup(`
           <a href="#" onclick="event.preventDefault(); 
-            state.selectedStop = state.gtfsData.stopsIndex['${stop.stop_id}']; 
-            state.stopViewFilteredRoutes = []; 
-			state.stopsListMapState = null;
-            render(); 
+            (async () => {
+              state.selectedStop = state.gtfsData.stopsIndex['${stop.stop_id}']; 
+              state.stopViewFilteredRoutes = []; 
+			  state.stopsListMapState = null;
+              render();
+              await prepareStopDetailData(state.selectedStop, state.selectedDate);
+              render();
+            })();
             return false;" 
             style="text-decoration: none; color:inherit;">
             <strong>${Utils.escapeHtml(stop.stop_name)}</strong><br>
@@ -5590,10 +5700,12 @@ async function renderStopsView() {
         });
       } else {
         // State 2: Lista pokazuje przystanki - bezpośrednie przejście do STOP_DETAIL
-        marker.on('click', () => {
+        marker.on('click', async () => {
           state.selectedStop = stop;
           state.stopViewFilteredRoutes = [];
-          render();
+          render(); // Show loading state first
+          await prepareStopDetailData(stop, state.selectedDate);
+          render(); // Re-render with data
         });
       }
       
@@ -5660,6 +5772,7 @@ async function renderStopsView() {
           state.selectedStop = stop;
           state.stopViewFilteredRoutes = [];
           render();
+          prepareStopDetailData(stop, state.selectedDate).then(() => render());
         }
         return;
       }
@@ -5731,6 +5844,7 @@ if (stop) {
   state.selectedStop = stop;
   state.stopViewFilteredRoutes = [];
   render();
+  prepareStopDetailData(stop, state.selectedDate).then(() => render());
 }
     };
     
@@ -6351,7 +6465,7 @@ state.currentTimetableData.stopDepartures = stopDepartures;
         
         // First column: stop name cell with onclick for modal
         // Note: mStop.id and mStop.name are escaped to prevent XSS
-        html += `<td class="p-2 font-medium sticky left-0 bg-white border border-gray-300 cursor-pointer hover:bg-blue-50 z-10" style="min-width:250px; padding-left: 10px;" onclick="openStopTimetable('${Utils.escapeHtml(mStop.id)}')">${Utils.escapeHtml(mStop.name)}${isOnDemandStop ? ' <span style="color: #ff0000; font-style: normal; margin-left: 4px;">&#128276;</span>' : ''}</td>`;
+        html += `<td class="p-2 font-medium sticky left-0 bg-white border border-gray-300 cursor-pointer hover:bg-blue-50 z-10" style="min-width:250px; padding-left: 10px;" onclick="openStopTimetable('${Utils.escapeHtml(mStop.id)}').catch(e => console.error('Error opening stop timetable:', e))">${Utils.escapeHtml(mStop.name)}${isOnDemandStop ? ' <span style="color: #ff0000; font-style: normal; margin-left: 4px;">&#128276;</span>' : ''}</td>`;
 
         const isMergedStop = mStop.stopIds && mStop.stopIds.length > 1;
 
@@ -6477,23 +6591,58 @@ state.currentTimetableData.stopDepartures = stopDepartures;
       }
     }
 
-function openStopTimetable(stopId) {
+async function openStopTimetable(stopId) {
   if (!state.gtfsData || !state.selectedDate) return;
   const stop = state.gtfsData.stopsIndex[stopId];
   if (!stop) return;
 
+  // Show loading state in modal
+  const modal = document.getElementById('stop-timetable-modal');
+  if (modal) {
+    const modalContent = modal.querySelector('.modal-content-area');
+    if (modalContent) {
+      modalContent.innerHTML = '<div class="p-4 text-center">Ładowanie rozkładu...</div>';
+    }
+    modal.classList.remove('hidden');
+  }
+
   // Collect departures at this stop
-  // If a route is selected, filter by route and direction
-  // Otherwise, show ALL routes
+  // Get active services for selected date
+  const activeServices = getServicesForDate(state.selectedDate);
+  const activeServicesSet = new Set(activeServices);
+  
   let allDepartures = [];
+  let tripsToLoad = [];
   
   if (state.selectedRoute && state.selectedDirection !== undefined) {
     // Filter by selected route and direction
     const routeTrips = state.gtfsData.tripsIndex[state.selectedRoute.route_id] || [];
-    const directionTrips = routeTrips.filter(t => (t.direction_id || '0') === state.selectedDirection);
+    const directionTrips = routeTrips.filter(t => 
+      (t.direction_id || '0') === state.selectedDirection && 
+      activeServicesSet.has(t.service_id)
+    );
     
-    directionTrips.forEach(trip => {
-      const stopTimes = getStopTimesIndexOrCache()[trip.trip_id] || [];
+    tripsToLoad = directionTrips;
+  } else {
+    // No route/direction filter - show ALL routes
+    state.gtfsData.routes.forEach(route => {
+      const routeTrips = state.gtfsData.tripsIndex[route.route_id] || [];
+      routeTrips.forEach(trip => {
+        if (activeServicesSet.has(trip.service_id)) {
+          tripsToLoad.push({ ...trip, route: route });
+        }
+      });
+    });
+  }
+  
+  // Load stop_times for all trips in parallel batches
+  const BATCH_SIZE = 50;
+  for (let i = 0; i < tripsToLoad.length; i += BATCH_SIZE) {
+    const batch = tripsToLoad.slice(i, Math.min(i + BATCH_SIZE, tripsToLoad.length));
+    
+    await Promise.all(batch.map(async (trip) => {
+      await ensureStopTimesLoaded(trip.trip_id);
+      const stopTimes = state.gtfsData.stopTimesIndex[trip.trip_id] || [];
       const stopTime = stopTimes.find(st => st.stop_id === stopId);
       
       if (stopTime) {
@@ -6505,35 +6654,11 @@ function openStopTimetable(stopId) {
             trip: trip,
             service_id: trip.service_id,
             headsign: trip.trip_headsign || '',
-            route: state.selectedRoute
+            route: trip.route || state.selectedRoute
           });
         }
       }
-    });
-  } else {
-    // No route/direction filter - show ALL routes
-    state.gtfsData.routes.forEach(route => {
-      const routeTrips = state.gtfsData.tripsIndex[route.route_id] || [];
-      
-      routeTrips.forEach(trip => {
-        const stopTimes = getStopTimesIndexOrCache()[trip.trip_id] || [];
-        const stopTime = stopTimes.find(st => st.stop_id === stopId);
-        
-        if (stopTime) {
-          const departureTime = stopTime.departure_time || stopTime.arrival_time;
-          if (departureTime) {
-            allDepartures.push({
-              trip_id: trip.trip_id,
-              time: departureTime,
-              trip: trip,
-              service_id: trip.service_id,
-              headsign: trip.trip_headsign || '',
-              route: route
-            });
-          }
-        }
-      });
-    });
+    }));
   }
 
   // Determine main destination based on the currently selected route (if any)

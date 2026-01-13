@@ -10,11 +10,29 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Load GTFS file (returns { success, data } or { success: false, error })
   loadGTFSFile: (filePath) => ipcRenderer.invoke('load-gtfs-file', filePath),
   
+  // Query routes
+  queryRoutes: () => ipcRenderer.invoke('query-routes'),
+  
+  // Query trips for a route
+  queryTrips: (params) => ipcRenderer.invoke('query-trips', params),
+  
+  // Query stop_times for a single trip
+  queryStopTimes: (tripId) => ipcRenderer.invoke('query-stop-times', tripId),
+  
   // Query stop_times for multiple trips in batch
   queryStopTimesBatch: (tripIds) => ipcRenderer.invoke('query-stop-times-batch', tripIds),
   
   // Query all stops
   queryAllStops: () => ipcRenderer.invoke('query-all-stops'),
+  
+  // Query all trips
+  queryAllTrips: () => ipcRenderer.invoke('query-all-trips'),
+  
+  // Query shape data
+  queryShape: (shapeId) => ipcRenderer.invoke('query-shape', shapeId),
+  
+  // Query available dates
+  queryAvailableDates: () => ipcRenderer.invoke('query-available-dates'),
   
   // Listen to load progress updates
   onLoadProgress: (callback) => {
