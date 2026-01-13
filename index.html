@@ -236,6 +236,9 @@ let state = {
   // Structure: columnOrderCache[cacheKey] = [trip_id, ...]
   columnOrderCache: {},
   
+  // Cached directions for current route (loaded from SQL)
+  cachedDirections: [],
+  
   // Performance metrics from last load
   lastLoadMetrics: null
 };
@@ -4176,6 +4179,7 @@ async function getAvailableDirections() {
     const directions = await window.electronAPI.queryDirectionsForRoute(routeIds);
     
     if (!directions || directions.length === 0) {
+      state.cachedDirections = [];
       return [];
     }
 
@@ -4219,12 +4223,20 @@ async function getAvailableDirections() {
       return { id: d.dir, name: safeDisplay, fullName: d.fullName, score: d.score };
     });
 
+    // Cache the result in state
+    state.cachedDirections = result;
     return result;
     
   } catch (err) {
-    console.error('[getAvailableDirections] SQL query failed, falling back to empty:', err);
-    return [];
+    console.error('[getAvailableDirections] SQL query failed, using cached or empty:', err);
+    // Return cached directions if available, otherwise empty
+    return state.cachedDirections || [];
   }
+}
+
+// Synchronous version for use in render - uses cached value
+function getAvailableDirectionsSync() {
+  return state.cachedDirections || [];
 }
 
 function applyDirectionHeuristic(perDir, absDiff = 1, relRatio = 0.30) {
@@ -5070,6 +5082,9 @@ async function selectRoute(routeId, directionId) {
       
       await batchLoadStopTimes(trips. map(t => t.trip_id));
     }
+    
+    // Load and cache directions for this route
+    await getAvailableDirections();
     
     state.loading = false;
     state.loadingStep = '';
@@ -7398,7 +7413,7 @@ case VIEW.LOADING:
 
   case VIEW.ROUTE_TIMETABLE:
     // ========== WIDOK LINII z rozkładem ==========
-    const directions = getAvailableDirections();
+    const directions = getAvailableDirectionsSync();
     const dirA = Array.isArray(directions) && directions.length >= 1 ? directions[0] : null;
     const dirB = Array.isArray(directions) && directions.length >= 2 ? directions[1] : null;
     const displayA = dirA ? (dirA.fullName || dirA.name || '') : '';
