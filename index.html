@@ -4603,34 +4603,26 @@ const ROUTES_INITIAL_BATCH = 100; // Pierwsza partia - to co widać na ekranie
 
 // ✅ Zmień renderRouteTable() na asynchroniczną
 function renderRouteTable() {
-  console.log('[ROUTE_TABLE] Starting renderRouteTable()');
-  console.time('ROUTE_TABLE_TOTAL');
+  console.log('=== [ROUTE_TABLE] START ===');
+  console.log('[ROUTE_TABLE] Container exists:', !!$('routes-tbody'));
+  console.log('[ROUTE_TABLE] gtfsData exists:', !!state. gtfsData);
+  console.log('[ROUTE_TABLE] logicalRoutes:', state.gtfsData?.logicalRoutes);
+  console.log('[ROUTE_TABLE] logicalRoutes type:', typeof state. gtfsData?.logicalRoutes);
+  console.log('[ROUTE_TABLE] logicalRoutes is Array?', Array.isArray(state.gtfsData?.logicalRoutes));
+  console.log('[ROUTE_TABLE] routes count:', state.gtfsData?.routes?.length);
+  console.log('[ROUTE_TABLE] routeGroupMode:', state.routeGroupMode);
   
   const container = $('routes-tbody');
-  if (!container) {
-    console.error('[ROUTE_TABLE] Container not found! ');
-    return;
-  }
-  
-  if (!state.gtfsData) {
-    console.error('[ROUTE_TABLE] No gtfsData! ');
-    return;
-  }
-  
-  console.log('[ROUTE_TABLE] state.gtfsData:', state.gtfsData);
-  console.log('[ROUTE_TABLE] logicalRoutes:', state.gtfsData.logicalRoutes);
-  console.log('[ROUTE_TABLE] routes:', state.gtfsData. routes?. length);
-  console.log('[ROUTE_TABLE] routeGroupMode:', state.routeGroupMode);
+  if (!container || !state.gtfsData) return;
   
   container.innerHTML = '';
 
   const logicalRoutes = state.gtfsData.logicalRoutes || [];
   const baseRoutes = (state.gtfsData.routes || []).slice();
   
-  console.log('[ROUTE_TABLE] logicalRoutes type:', typeof logicalRoutes);
-  console.log('[ROUTE_TABLE] logicalRoutes is Array? ', Array.isArray(logicalRoutes));
-  console.log('[ROUTE_TABLE] baseRoutes length:', baseRoutes.length);
-
+  console.log('[ROUTE_TABLE] After assignment - logicalRoutes:', logicalRoutes);
+  console.log('[ROUTE_TABLE] After assignment - baseRoutes length:', baseRoutes.length);
+  
   function reprOf(group) {
     return (group && group.members && group.members[0]) || null;
   }
