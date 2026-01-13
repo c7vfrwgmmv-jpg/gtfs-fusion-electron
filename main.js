@@ -339,14 +339,22 @@ ipcMain.handle('query-routes', async () => {
     const conn = db.connect();
     conn.all(`
       SELECT 
-        r.*,
+        r.route_id,
+        ANY_VALUE(r.agency_id) as agency_id,
+        ANY_VALUE(r.route_short_name) as route_short_name,
+        ANY_VALUE(r.route_long_name) as route_long_name,
+        ANY_VALUE(r.route_desc) as route_desc,
+        ANY_VALUE(r.route_type) as route_type,
+        ANY_VALUE(r.route_url) as route_url,
+        ANY_VALUE(r.route_color) as route_color,
+        ANY_VALUE(r.route_text_color) as route_text_color,
         COALESCE(ANY_VALUE(a.agency_name), 'Unknown') as agency_name,
         COUNT(DISTINCT t.trip_id) as trip_count
       FROM routes r
       LEFT JOIN agency a ON r.agency_id = a.agency_id
       LEFT JOIN trips t ON r.route_id = t.route_id
-      GROUP BY r.route_id, r.agency_id, r.route_short_name, r.route_long_name, r.route_type, r.route_color, r.route_text_color, r.route_desc, r.route_url
-      ORDER BY r.route_short_name
+      GROUP BY r.route_id
+      ORDER BY ANY_VALUE(r.route_short_name)
     `, (err, rows) => {
       if (err) return reject(err);
       resolve(convertBigIntsToNumbers(rows || []));
