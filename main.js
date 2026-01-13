@@ -392,22 +392,21 @@ ipcMain.handle('query-trips', async (event, { routeId, date, directionId }) => {
   const conn = db.connect();
   
   try {
-    // Walidacja PRZED sprawdzaniem tabel
+    // Walidacja
     if (!routeId) {
-      throw new Error('❌ routeId is missing!  Got:  ' + routeId);
+      throw new Error('❌ routeId is missing!   Got:   ' + routeId);
     }
     
     if (!date || date.length !== 8) {
-      throw new Error('❌ date is invalid!  Got: ' + date);
+      throw new Error('❌ date is invalid!  Got:  ' + date);
     }
     
-    const direction = String(directionId ??  '0');
-    
+    const direction = String(directionId ??   '0');
     console.log('✅ Validated params:', { routeId, date, direction });
     
     const dateObj = new Date(
       parseInt(date.substring(0, 4)),
-      parseInt(date.substring(4, 6)) - 1,
+      parseInt(date. substring(4, 6)) - 1,
       parseInt(date.substring(6, 8))
     );
     const dayNames = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
@@ -433,7 +432,7 @@ ipcMain.handle('query-trips', async (event, { routeId, date, directionId }) => {
     // Get columns
     const columns = await new Promise((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error('Query timeout getting columns')), 10000);
-      conn.all(`SELECT column_name FROM information_schema.columns WHERE table_name = 'trips'`, 
+      conn.all(`SELECT column_name FROM information_schema. columns WHERE table_name = 'trips'`, 
         (err, rows) => {
           clearTimeout(timeout);
           if (err) reject(err);
@@ -446,7 +445,7 @@ ipcMain.handle('query-trips', async (event, { routeId, date, directionId }) => {
     // Build SELECT clause
     const selectClauses = [];
     
-    if (columnSet.has('route_id')) selectClauses.push('t.route_id');
+    if (columnSet.has('route_id')) selectClauses.push('t. route_id');
     if (columnSet.has('service_id')) selectClauses.push('t.service_id');
     if (columnSet.has('trip_id')) selectClauses.push('t.trip_id');
     if (columnSet.has('trip_headsign')) selectClauses.push('t.trip_headsign');
@@ -455,7 +454,7 @@ ipcMain.handle('query-trips', async (event, { routeId, date, directionId }) => {
     if (columnSet.has('block_id')) selectClauses.push('t.block_id');
     if (columnSet.has('shape_id')) selectClauses.push('t.shape_id');
     if (columnSet.has('wheelchair_accessible')) selectClauses.push('t.wheelchair_accessible');
-    if (columnSet.has('bikes_allowed')) selectClauses.push('t.bikes_allowed');
+    if (columnSet.has('bikes_allowed')) selectClauses.push('t. bikes_allowed');
     
     selectClauses.push('(SELECT departure_time FROM stop_times WHERE trip_id = t.trip_id ORDER BY CAST(stop_sequence AS INTEGER) ASC LIMIT 1) as first_departure');
     
@@ -463,57 +462,54 @@ ipcMain.handle('query-trips', async (event, { routeId, date, directionId }) => {
     let query;
     let params;
     
-if (hasCalendar && hasCalendarDates) {
-  query = `
-    WITH active_services AS (
-      SELECT service_id FROM calendar
-      WHERE start_date <= $1 AND end_date >= $2 AND ${dayColumn} = '1'
-      UNION
-      SELECT service_id FROM calendar_dates WHERE date = $3 AND exception_type = '1'
-      EXCEPT
-      SELECT service_id FROM calendar_dates WHERE date = $4 AND exception_type = '2'
-    )
-    SELECT ${selectClauses. join(', ')}
-    FROM trips t
-    WHERE t.route_id = $5 AND t.direction_id = $6 AND t.service_id IN (SELECT service_id FROM active_services)
-    ORDER BY first_departure
-  `;
-  params = [date, date, date, date, routeId, direction];
-  
-} else if (hasCalendar) {
-  query = `
-    WITH active_services AS (
-      SELECT service_id FROM calendar
-      WHERE start_date <= $1 AND end_date >= $2 AND ${dayColumn} = '1'
-    )
-    SELECT ${selectClauses.join(', ')}
-    FROM trips t
-    WHERE t.route_id = $3 AND t.direction_id = $4 AND t.service_id IN (SELECT service_id FROM active_services)
-    ORDER BY first_departure
-  `;
-  params = [date, date, routeId, direction];
-  
-} else {
-  query = `
-    SELECT ${selectClauses.join(', ')}
-    FROM trips t
-    WHERE t.route_id = $1 AND t.direction_id = $2 
-    ORDER BY first_departure
-  `;
-  params = [routeId, direction];
-}
+    if (hasCalendar && hasCalendarDates) {
+      query = `
+        WITH active_services AS (
+          SELECT service_id FROM calendar
+          WHERE start_date <= $1 AND end_date >= $2 AND ${dayColumn} = '1'
+          UNION
+          SELECT service_id FROM calendar_dates WHERE date = $3 AND exception_type = '1'
+          EXCEPT
+          SELECT service_id FROM calendar_dates WHERE date = $4 AND exception_type = '2'
+        )
+        SELECT ${selectClauses. join(', ')}
+        FROM trips t
+        WHERE t.route_id = $5 AND t.direction_id = $6 AND t.service_id IN (SELECT service_id FROM active_services)
+        ORDER BY first_departure
+      `;
+      params = [date, date, date, date, routeId, direction];
+      
+    } else if (hasCalendar) {
+      query = `
+        WITH active_services AS (
+          SELECT service_id FROM calendar
+          WHERE start_date <= $1 AND end_date >= $2 AND ${dayColumn} = '1'
+        )
+        SELECT ${selectClauses.join(', ')}
+        FROM trips t
+        WHERE t. route_id = $3 AND t.direction_id = $4 AND t.service_id IN (SELECT service_id FROM active_services)
+        ORDER BY first_departure
+      `;
+      params = [date, date, routeId, direction];
+      
+    } else {
+      query = `
+        SELECT ${selectClauses.join(', ')}
+        FROM trips t
+        WHERE t. route_id = $1 AND t.direction_id = $2 
+        ORDER BY first_departure
+      `;
+      params = [routeId, direction];
+    }
     
-conn.all(query, ...params, (err, rows) => {
-  
-    console.log('[SQL] Query params:', params);
-    
-    // Execute query
+    console. log('[SQL] Query params:', params);
     console.log('🚀 About to execute query with params:', params);
-    console.log('📝 Query:', query. substring(0, 200) + '...'); // pierwsze 200 znaków
+    console.log('📝 Query:', query.substring(0, 200) + '...');
     
+    // ✅ JEDNO wywołanie conn.all z spread operatorem
     const rows = await new Promise((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error('Query timeout')), 30000);
-      conn.all(query, params, (err, rows) => {
+      conn.all(query, ...params, (err, rows) => {  // ✅ ... params (spread operator)
         clearTimeout(timeout);
         if (err) {
           console.error('❌ [SQL] Query error:', err);
@@ -526,13 +522,13 @@ conn.all(query, ...params, (err, rows) => {
       });
     });
     
-    console.log('[SQL] query-trips SUCCESS:', rows.length, 'rows');
+    console.log('✅ [SQL] query-trips SUCCESS:', rows.length, 'rows');
     
     conn.close();
     return convertBigIntsToNumbers(rows);
     
   } catch (error) {
-    console.error('[SQL] query-trips ERROR:', error);
+    console.error('❌ [SQL] query-trips ERROR:', error);
     try {
       conn.close();
     } catch (e) {}
@@ -697,4 +693,5 @@ app.on('quit', async () => {
   if (db) await new Promise((resolve) => db.close(resolve));
 
 });
+
 
