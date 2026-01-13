@@ -2336,34 +2336,22 @@ async function loadAllTrips() {
 async function prepareStopDetailData(stop, selectedDate) {
   if (!stop || !selectedDate || !state.gtfsData) return;
   
-  const departures = [];
-  const routesAtStop = new Map();
-  
   try {
-    // Use SQL to get all routes at this stop
-    const routesData = await window.electronAPI.queryRoutesAtStop({
+    const result = await window.electronAPI.prepareStopDetailData({
       stopId: stop.stop_id,
       date: selectedDate
     });
+    
+    const departures = [];
+    const routesAtStop = new Map();
     
     // Build routes map
-    routesData.forEach(routeData => {
-      const route = {
-        route_id: routeData.route_id,
-        route_short_name: routeData.route_short_name,
-        route_long_name: routeData.route_long_name,
-        route_type: routeData.route_type
-      };
-      routesAtStop.set(route.route_id, route);
+    result.routes.forEach(routeData => {
+      routesAtStop.set(routeData.route_id, routeData);
     });
     
-    // Get all departures from SQL
-    const sqlDepartures = await window.electronAPI.queryDeparturesForStop({
-      stopId: stop.stop_id,
-      date: selectedDate
-    });
-    
-    sqlDepartures.forEach(d => {
+    // Build departures array
+    result.departures.forEach(d => {
       departures.push({
         route: routesAtStop.get(d.route_id),
         trip: { trip_id: d.trip_id },
@@ -2374,15 +2362,17 @@ async function prepareStopDetailData(stop, selectedDate) {
       });
     });
     
+    departures.sort((a, b) => a.timeMinutes - b.timeMinutes);
+    
+    // Store departures in state for rendering
+    state.stopDetailDepartures = departures;
+    state.stopDetailRoutesAtStop = routesAtStop;
+    
   } catch (err) {
-    console.error('[prepareStopDetailData] SQL error:', err);
+    console.error('[prepareStopDetailData] Error:', err);
+    state.stopDetailDepartures = [];
+    state.stopDetailRoutesAtStop = new Map();
   }
-  
-  departures.sort((a, b) => a.timeMinutes - b.timeMinutes);
-  
-  // Store departures in state for rendering
-  state.stopDetailDepartures = departures;
-  state.stopDetailRoutesAtStop = routesAtStop;
 }
 
 function formatDateLabel(dateStr) {
