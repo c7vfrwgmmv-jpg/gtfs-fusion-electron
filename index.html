@@ -2336,25 +2336,42 @@ async function loadAllTrips() {
 async function prepareStopDetailData(stop, selectedDate) {
   if (!stop || !selectedDate || !state.gtfsData) return;
   
-  const activeServices = getServicesForDate(selectedDate);
-  const activeServicesSet = new Set(activeServices);
-  
-  // Collect all trips that might stop at this stop
-  const tripsToLoad = [];
-  state.gtfsData.routes.forEach(route => {
-    const trips = state.gtfsData.tripsIndex[route.route_id] || [];
-    trips.forEach(trip => {
-      if (activeServicesSet.has(trip.service_id)) {
-        tripsToLoad.push(trip.trip_id);
-      }
+  try {
+    const result = await window.electronAPI.prepareStopDetailData({
+      stopId: stop.stop_id,
+      date: selectedDate
     });
-  });
-  
-  // Load stop_times in batches
-  const BATCH_SIZE = 100;
-  for (let i = 0; i < tripsToLoad.length; i += BATCH_SIZE) {
-    const batch = tripsToLoad.slice(i, Math.min(i + BATCH_SIZE, tripsToLoad.length));
-    await Promise.all(batch.map(tripId => ensureStopTimesLoaded(tripId)));
+    
+    const departures = [];
+    const routesAtStop = new Map();
+    
+    // Build routes map
+    result.routes.forEach(routeData => {
+      routesAtStop.set(routeData.route_id, routeData);
+    });
+    
+    // Build departures array
+    result.departures.forEach(d => {
+      departures.push({
+        route: routesAtStop.get(d.route_id),
+        trip: { trip_id: d.trip_id },
+        trip_id: d.trip_id,
+        time: d.departure_time,
+        timeMinutes: Utils.timeToMinutes(d.departure_time),
+        headsign: d.trip_headsign || ''
+      });
+    });
+    
+    departures.sort((a, b) => a.timeMinutes - b.timeMinutes);
+    
+    // Store departures in state for rendering
+    state.stopDetailDepartures = departures;
+    state.stopDetailRoutesAtStop = routesAtStop;
+    
+  } catch (err) {
+    console.error('[prepareStopDetailData] Error:', err);
+    state.stopDetailDepartures = [];
+    state.stopDetailRoutesAtStop = new Map();
   }
 }
 
@@ -5916,7 +5933,7 @@ function getTripDestination(dep) {
   }
   
   // 2. Fallback: last stop_name from stop_times sequence
-  const stopTimes = getStopTimesIndexOrCache()[dep.trip.trip_id] || [];
+  const stopTimes = getStopTimesIndexOrCache()[dep.trip_id] || [];
   if (stopTimes.length > 0) {
     const sorted = stopTimes.slice().sort((a, b) => {
       const seqA = parseInt(a.stop_sequence || '0', 10);
@@ -7200,36 +7217,9 @@ case VIEW.LOADING:
     
     const allStopIds = stop.stopIds || [stop.stop_id];
     
-    const activeServices = getServicesForDate(state.selectedDate);
-    const departures = [];
-    const routesAtStop = new Map();
-    
-    state.gtfsData.routes.forEach(route => {
-      const trips = state.gtfsData.tripsIndex[route.route_id] || [];
-      trips.forEach(trip => {
-        if (!activeServices.includes(trip.service_id)) return;
-        const stopTimes = getStopTimesIndexOrCache()[trip.trip_id] || [];
-        const stopTime = stopTimes.find(st => st.stop_id === stop.stop_id);
-        if (stopTime) {
-          const departureTime = stopTime.departure_time || stopTime.arrival_time;
-          if (departureTime) {
-            departures.push({
-              route: route,
-              trip: trip,
-              time: departureTime,
-              timeMinutes: Utils.timeToMinutes(departureTime),
-              headsign: trip.trip_headsign || ''
-            });
-            if (!routesAtStop.has(route.route_id)) routesAtStop.set(route.route_id, route);
-          }
-        }
-      });
-    });
-    
-    departures.sort((a, b) => a.timeMinutes - b.timeMinutes);
-    
-    // Store departures in state for dynamic filtering
-    state.stopDetailDepartures = departures;
+    // Use pre-loaded data from prepareStopDetailData()
+    const departures = state.stopDetailDepartures || [];
+    const routesAtStop = state.stopDetailRoutesAtStop || new Map();
     
     let filteredDepartures = departures;
     if (state.stopViewFilteredRoutes.length > 0) {
@@ -7607,9 +7597,39 @@ document.querySelectorAll('.route-filter-btn').forEach(btn => {
 $('direction-select')?.addEventListener('change', async (e) => {
     const newDirection = String(e.target.value);
     if (newDirection === state.selectedDirection) return; // Avoid redundant updates
+    
     state.selectedDirection = newDirection;
-    // Invalidate canonical cache when direction changes
     invalidateCanonicalCacheForCurrentSelection();
+    
+    // Reload trips for new direction
+    if (state.selectedRoute) {
+      state.loading = true;
+      render(); // Show loading state
+      
+      try {
+        const trips = await window.electronAPI.queryTrips({
+          routeId: state.selectedRoute.route_id,
+          date: state.selectedDate,
+          directionId: newDirection
+        });
+        
+        state.currentTrips = trips;
+        state.gtfsData.tripsIndex[state.selectedRoute.route_id] = trips;
+        
+        // Batch load stop times
+        await batchLoadStopTimes(trips.map(t => t.trip_id));
+        
+        // Reload cached directions
+        await getAvailableDirections();
+        
+      } catch (err) {
+        console.error('[Direction change] Error:', err);
+        state.error = err.message;
+      } finally {
+        state.loading = false;
+      }
+    }
+    
     resetMap();
     render();
   });
@@ -7719,34 +7739,8 @@ $('date-select-stop')?.addEventListener('change', async (e) => {
     filterStopDetailMapLayers(state.stopViewFilteredRoutes);
   }
   
-  const activeServices = getServicesForDate(state.selectedDate);
-  const departures = [];
-  const routesAtStop = new Map();
-  
-  state.gtfsData.routes.forEach(route => {
-    const trips = state.gtfsData.tripsIndex[route.route_id] || [];
-    trips.forEach(trip => {
-      if (!activeServices.includes(trip.service_id)) return;
-      const stopTimes = getStopTimesIndexOrCache()[trip.trip_id] || [];
-      const stopTime = stopTimes.find(st => st.stop_id === state.selectedStop.stop_id);
-      if (stopTime) {
-        const departureTime = stopTime.departure_time || stopTime.arrival_time;
-        if (departureTime) {
-          departures.push({
-            route: route,
-            trip: trip,
-            time: departureTime,
-            timeMinutes: Utils.timeToMinutes(departureTime),
-            headsign: trip.trip_headsign || ''
-          });
-          if (!routesAtStop.has(route.route_id)) routesAtStop.set(route.route_id, route);
-        }
-      }
-    });
-  });
-  
-  departures.sort((a, b) => a.timeMinutes - b.timeMinutes);
-  state.stopDetailDepartures = departures;
+  // Load departure data for the new date
+  await prepareStopDetailData(state.selectedStop, state.selectedDate);
   
   // Update UI
   updateDeparturesTable();
