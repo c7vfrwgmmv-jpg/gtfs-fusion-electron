@@ -4489,7 +4489,12 @@ function filterStopDetailMapLayers(filteredRouteIds = []) {
 // ═══════════════════════════════════════════════════════════════
 // 11. UI RENDERING - ROUTES VIEW
 // ═══════════════════════════════════════════════════════════════
-function renderRouteTable() {
+// ✅ Dodaj na początku pliku (obok innych stałych)
+const ROUTES_RENDER_BATCH_SIZE = 50; // Renderuj po 50 tras na raz
+const ROUTES_INITIAL_BATCH = 100; // Pierwsza partia - to co widać na ekranie
+
+// ✅ Zmień renderRouteTable() na asynchroniczną
+async function renderRouteTable() {
   const container = $('routes-tbody');
   if (!container || !state.gtfsData) return;
   container.innerHTML = '';
@@ -4501,16 +4506,27 @@ function renderRouteTable() {
     return (group && group.members && group.members[0]) || null;
   }
 
-function labelOf(group) {
+  function labelOf(group) {
     const r = reprOf(group);
-    if (!r) return group?.route_short_name || '';
-    return r.route_short_name || r.route_id || group.route_short_name || '';
-}
+    if (!r) return group?. route_short_name || '';
+    return r.route_short_name || r.route_id || group. route_short_name || '';
+  }
 
+  // ✅ OPTYMALIZACJA 1: Cache sortowania
   function sortGroupsByRouteId(arr) {
+    // Użyj prostszego sortowania dla liczb
     return arr.slice().sort((a, b) => {
       const la = String(labelOf(a) || '').trim();
       const lb = String(labelOf(b) || '').trim();
+      
+      // Sprawdź czy są to liczby
+      const numA = parseInt(la, 10);
+      const numB = parseInt(lb, 10);
+      
+      if (! isNaN(numA) && !isNaN(numB)) {
+        return numA - numB; // Szybsze sortowanie numeryczne
+      }
+      
       return la.localeCompare(lb, undefined, { numeric: true, sensitivity: 'base' });
     });
   }
@@ -4519,119 +4535,159 @@ function labelOf(group) {
     return routes.slice().sort((a, b) => {
       const la = String(a.route_short_name || a.route_id || '').trim();
       const lb = String(b.route_short_name || b.route_id || '').trim();
+      
+      const numA = parseInt(la, 10);
+      const numB = parseInt(lb, 10);
+      
+      if (!isNaN(numA) && !isNaN(numB)) {
+        return numA - numB;
+      }
+      
       return la.localeCompare(lb, undefined, { numeric: true, sensitivity: 'base' });
     });
   }
 
-  // === TRYB 1: LOGICAL (DOMYŚLNY) – jedna siatka z logicznymi liniami ===
+  // ✅ OPTYMALIZACJA 2: Funkcja pomocnicza do tworzenia przycisku
+  function createRouteButton(group, repr) {
+    const metaRt = getRouteTypeMeta(repr.route_type);
+    const btn = document. createElement('button');
+    btn.className = 'route-card';
+    btn.style.borderLeft = `6px solid ${metaRt.color || '#e6eefb'}`;
+
+    const label = labelOf(group);
+    btn.innerHTML = `
+      <div style="display:flex;flex-direction:column;align-items: center;justify-content:center;">
+        <div style="font-weight:700;">${Utils.escapeHtml(label)}</div>
+      </div>
+    `;
+
+    btn.onclick = () => {
+      state.selectedRouteGroup = group;
+      selectRoute(repr.route_id, '0');
+    };
+
+    return btn;
+  }
+
+  // ✅ OPTYMALIZACJA 3: Batch rendering z użyciem requestAnimationFrame
+  async function renderBatch(items, container, createButton, startIndex = 0) {
+    const batchSize = startIndex === 0 ? ROUTES_INITIAL_BATCH : ROUTES_RENDER_BATCH_SIZE;
+    const fragment = document.createDocumentFragment(); // Używaj DocumentFragment
+    
+    const endIndex = Math.min(startIndex + batchSize, items.length);
+    
+    for (let i = startIndex; i < endIndex; i++) {
+      const item = items[i];
+      const btn = createButton(item);
+      if (btn) fragment.appendChild(btn);
+    }
+    
+    container.appendChild(fragment);
+    
+    // Jeśli są jeszcze elementy, renderuj kolejną partię
+    if (endIndex < items.length) {
+      // Pokaż wskaźnik ładowania
+      const loadingDiv = document.createElement('div');
+      loadingDiv.id = 'routes-loading-more';
+      loadingDiv.className = 'p-4 text-center text-gray-500';
+      loadingDiv.textContent = `Ładowanie tras... (${endIndex}/${items.length})`;
+      container.appendChild(loadingDiv);
+      
+      // Użyj requestAnimationFrame dla płynności
+      await new Promise(resolve => requestAnimationFrame(resolve));
+      
+      // Usuń wskaźnik
+      const loader = $('routes-loading-more');
+      if (loader) loader.remove();
+      
+      // Renderuj kolejną partię
+      await renderBatch(items, container, createButton, endIndex);
+    }
+  }
+
+  // === TRYB 1:  LOGICAL (DOMYŚLNY) ===
   if (state.routeGroupMode === 'logical') {
     if (!logicalRoutes.length) return;
 
     const grid = document.createElement('div');
     grid.className = 'routes-grid';
-
-    sortGroupsByRouteId(logicalRoutes).forEach(group => {
-      const repr = reprOf(group);
-      if (!repr) return;
-      const metaRt = getRouteTypeMeta(repr.route_type);
-      const btn = document.createElement('button');
-      btn.className = 'route-card';
-      btn.style.borderLeft = `6px solid ${metaRt.color || '#e6eefb'}`;
-
-const label = labelOf(group);
-
-btn.innerHTML = `
-  <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;">
-    <div style="font-weight:700;">${Utils.escapeHtml(label)}</div>
-  </div>
-`;
-
-      btn.onclick = () => {
-        state.selectedRouteGroup = group;
-        selectRoute(repr.route_id, '0');
-      };
-
-      grid.appendChild(btn);
-    });
-
     container.appendChild(grid);
+
+    console.log('[Render] Sorting', logicalRoutes.length, 'logical routes.. .');
+    const sortedGroups = sortGroupsByRouteId(logicalRoutes);
+    
+    console.log('[Render] Rendering routes in batches...');
+    await renderBatch(
+      sortedGroups,
+      grid,
+      (group) => {
+        const repr = reprOf(group);
+        if (!repr) return null;
+        return createRouteButton(group, repr);
+      }
+    );
+    
+    console.log('[Render] Routes rendered successfully');
     return;
   }
 
-  // === TRYB 2: SERVICE_TYPE – logiczne linie zgrupowane wg canonical_type ===
-  if (state.routeGroupMode === 'service_type') {
+  // === TRYB 2: SERVICE_TYPE ===
+  if (state. routeGroupMode === 'service_type') {
     if (!logicalRoutes.length) return;
 
-    const groupsByCat = new Map();
-
+    const byCanonical = new Map();
     logicalRoutes.forEach(group => {
       const repr = reprOf(group);
-      const cat = repr ? (collectRouteType(repr).canonical || 'other') : 'other';
-      if (!groupsByCat.has(cat)) groupsByCat.set(cat, []);
-      groupsByCat.get(cat).push(group);
+      const can = canonicalFromCode(repr?.route_type);
+      const key = can || 'other';
+      if (!byCanonical.has(key)) byCanonical.set(key, []);
+      byCanonical.get(key).push(group);
     });
 
-    const catKeys = Array.from(groupsByCat.keys()).sort((a, b) => {
-      const oa = (CANONICAL_CATEGORIES[a] && CANONICAL_CATEGORIES[a].order) || 999;
-      const ob = (CANONICAL_CATEGORIES[b] && CANONICAL_CATEGORIES[b].order) || 999;
-      if (oa !== ob) return oa - ob;
-      const la = (CANONICAL_CATEGORIES[a] && CANONICAL_CATEGORIES[a].label) || String(a);
-      const lb = (CANONICAL_CATEGORIES[b] && CANONICAL_CATEGORIES[b].label) || String(b);
-      return la.localeCompare(lb, undefined, { sensitivity: 'base' });
+    const sortedKeys = Array.from(byCanonical.keys()).sort((a, b) => {
+      const orderA = CANONICAL_CATEGORIES[a]?.order ??  999;
+      const orderB = CANONICAL_CATEGORIES[b]?. order ?? 999;
+      return orderA - orderB;
     });
 
-    catKeys.forEach(cat => {
+    for (const canonical of sortedKeys) {
       const titleEl = document.createElement('div');
-      titleEl.className = 'agency-title';
-      titleEl.textContent = (CANONICAL_CATEGORIES[cat] && CANONICAL_CATEGORIES[cat].label) || cat || 'Other';
+      titleEl.className = 'canonical-title';
+      titleEl.textContent = CANONICAL_CATEGORIES[canonical]?. label || canonical;
       container.appendChild(titleEl);
 
       const grid = document.createElement('div');
       grid.className = 'routes-grid';
-
-      const list = sortGroupsByRouteId(groupsByCat.get(cat) || []);
-      list.forEach(group => {
-        const repr = reprOf(group);
-        if (!repr) return;
-        const metaRt = getRouteTypeMeta(repr.route_type);
-        const btn = document.createElement('button');
-        btn.className = 'route-card';
-        btn.style.borderLeft = `6px solid ${metaRt.color || '#e6eefb'}`;
-
-const label = labelOf(group);
-
-btn.innerHTML = `
-  <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;">
-    <div style="font-weight:700;">${Utils.escapeHtml(label)}</div>
-  </div>
-`;
-
-        btn.onclick = () => {
-          state.selectedRouteGroup = group;
-          selectRoute(repr.route_id, '0');
-        };
-
-        grid.appendChild(btn);
-      });
-
       grid.style.marginBottom = '28px';
       container.appendChild(grid);
-    });
+
+      const list = sortGroupsByRouteId(byCanonical.get(canonical) || []);
+      
+      // ✅ Batch rendering dla każdej grupy
+      await renderBatch(
+        list,
+        grid,
+        (group) => {
+          const repr = reprOf(group);
+          if (!repr) return null;
+          return createRouteButton(group, repr);
+        }
+      );
+    }
 
     return;
   }
 
-  // === TRYB 3: AGENCY – logiczne linie zgrupowane wg przewoźnika ===
+  // === TRYB 3: AGENCY ===
   if (state.routeGroupMode === 'agency') {
     if (!logicalRoutes.length) return;
 
     const byAgency = new Map();
-
     logicalRoutes.forEach(group => {
       const repr = reprOf(group);
       const agencyId = repr?.agency_id || group.agency_id || '';
       const agencyName = agencyId && state.gtfsData.agenciesIndex[agencyId]
-        ? (state.gtfsData.agenciesIndex[agencyId].agency_name || agencyId)
+        ? (state. gtfsData.agenciesIndex[agencyId].agency_name || agencyId)
         : 'Nieznany przewoźnik';
 
       if (!byAgency.has(agencyName)) byAgency.set(agencyName, []);
@@ -4639,78 +4695,64 @@ btn.innerHTML = `
     });
 
     const agencyKeys = Array.from(byAgency.keys()).sort((a, b) =>
-      a.localeCompare(b, undefined, { sensitivity: 'base' })
+      a.localeCompare(b, undefined, { sensitivity:  'base' })
     );
 
-    agencyKeys.forEach(agencyName => {
-      const titleEl = document.createElement('div');
+    for (const agencyName of agencyKeys) {
+      const titleEl = document. createElement('div');
       titleEl.className = 'agency-title';
       titleEl.textContent = agencyName;
       container.appendChild(titleEl);
 
       const grid = document.createElement('div');
       grid.className = 'routes-grid';
+      grid.style.marginBottom = '28px';
+      container. appendChild(grid);
 
       const list = sortGroupsByRouteId(byAgency.get(agencyName) || []);
-      list.forEach(group => {
-        const repr = reprOf(group);
-        if (!repr) return;
-        const metaRt = getRouteTypeMeta(repr.route_type);
-        const btn = document.createElement('button');
-        btn.className = 'route-card';
-        btn.style.borderLeft = `6px solid ${metaRt.color || '#e6eefb'}`;
-
-    const label = labelOf(group);
-
-    btn.innerHTML = `
-      <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;">
-        <div style="font-weight:700;">${Utils.escapeHtml(label)}</div>
-      </div>
-    `;
-
-        btn.onclick = () => {
-          state.selectedRouteGroup = group;
-          selectRoute(repr.route_id, '0');
-        };
-
-        grid.appendChild(btn);
-      });
-
-      grid.style.marginBottom = '28px';
-      container.appendChild(grid);
-    });
+      
+      await renderBatch(
+        list,
+        grid,
+        (group) => {
+          const repr = reprOf(group);
+          if (!repr) return null;
+          return createRouteButton(group, repr);
+        }
+      );
+    }
 
     return;
   }
 
-  // === TRYB 4: RAW_ROUTES – awaryjny: każdy rekord routes osobno, sort po numerze ===
+  // === TRYB 4: RAW_ROUTES ===
   if (state.routeGroupMode === 'raw_routes') {
     const routes = sortRoutesById(baseRoutes);
     const grid = document.createElement('div');
     grid.className = 'routes-grid';
-
-    routes.forEach(route => {
-      const btn = document.createElement('button');
-      btn.className = 'route-card';
-      btn.textContent = route.route_short_name || route.route_id || '';
-      const metaRt = getRouteTypeMeta(route.route_type);
-      btn.style.borderLeft = `6px solid ${metaRt.color || '#e6eefb'}`;
-
-      btn.onclick = () => {
-        state.selectedRouteGroup = null; // w tym trybie świadomie patrzymy na pojedynczy route_id
-        selectRoute(route.route_id, '0');
-      };
-
-      grid.appendChild(btn);
-    });
-
     container.appendChild(grid);
+
+    await renderBatch(
+      routes,
+      grid,
+      (route) => {
+        const btn = document.createElement('button');
+        btn.className = 'route-card';
+        btn.textContent = route.route_short_name || route.route_id || '';
+        const metaRt = getRouteTypeMeta(route.route_type);
+        btn.style. borderLeft = `6px solid ${metaRt.color || '#e6eefb'}`;
+
+        btn.onclick = () => {
+          state.selectedRouteGroup = null;
+          selectRoute(route. route_id, '0');
+        };
+
+        return btn;
+      }
+    );
+
     return;
   }
-
-  // fallback – jeśli coś poszło nie tak, wracamy do logical
-  state.routeGroupMode = 'logical';
-  renderRouteTable();
 }
 
 async function selectRoute(routeId, directionId) {
