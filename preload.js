@@ -21,6 +21,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
     };
   },
   
+  // Query APIs for DuckDB
+  queryRoutes: () => ipcRenderer.invoke('query-routes'),
+  queryTrips: (filters) => ipcRenderer.invoke('query-trips', filters),
+  queryStopTimes: (tripId) => ipcRenderer.invoke('query-stop-times', tripId),
+  queryShape: (shapeId) => ipcRenderer.invoke('query-shape', shapeId),
+  queryAvailableDates: () => ipcRenderer.invoke('query-available-dates'),
+  
   // Platform info
   platform: process.platform,
   isElectron: true

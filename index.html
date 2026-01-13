@@ -1925,64 +1925,32 @@ async function handleFileUpload(e) {
       throttledRender();
     });
     
-// Load file in main process
-console.log('[App] Starting GTFS load...');
-
-// ✅ DODAJ TIMEOUT (30s)
-const timeoutPromise = new Promise((_, reject) => 
-  setTimeout(() => reject(new Error('Load timeout - no response from main process')), 30000)
-);
-
-let result;
-try {
-  result = await Promise.race([
-    window.electronAPI.loadGTFSFile(filePath),
-    timeoutPromise
-  ]);
-} catch (err) {
-  cleanupProgress();
-  throw new Error('Failed to load GTFS: ' + err.message);
-}
-
-console.log('[App] Raw result from main:', result); // ✅ DEBUG
-
-// Cleanup progress listener
-cleanupProgress();
-
-if (!result) {
-  throw new Error('No response from main process');
-}
-
-if (!result.success) {
-  throw new Error(result.error || 'Unknown error loading GTFS');
-}
-
-console.log('[App] GTFS data received from main process');
+    // Load file in main process
+    console.log('[App] Starting GTFS load...');
+    
+    const result = await window.electronAPI.loadGTFSFile(filePath);
+    
+    console.log('[App] Raw result from main:', result);
     
     // Cleanup progress listener
     cleanupProgress();
+    
+    if (!result) {
+      throw new Error('No response from main process');
+    }
     
     if (!result.success) {
       throw new Error(result.error || 'Unknown error loading GTFS');
     }
     
-    console.log('[App] GTFS data received from main process');
+    console.log('[App] GTFS data loaded from', result.fromCache ? 'cache' : 'scratch');
     
-    // Convert calendarDatesByDateIndex back to Map
-    const calendarDatesByDateIndex = new Map(result.data.calendarDatesByDateIndex || []);
+    // Initialize state with database reference
+    state.gtfsData = { loaded: true, stats: result.stats, fromCache: result.fromCache };
     
-    // Apply data to state
-    state.gtfsData = {
-      ...result.data,
-      calendarDatesByDateIndex
-    };
-    
-    // Build logical routes (UI logic, stays in renderer)
-    console.log('[App] Building logical routes...');
-    state.gtfsData.logicalRoutes = buildLogicalRoutes(
-      state.gtfsData.routes,
-      state.gtfsData.agenciesIndex
-    );
+    // Load routes and dates from database
+    await loadRoutesForUI();
+    await loadAvailableDates();
     
     // Clear caches
     stationNameToIdCache = null;
@@ -1992,46 +1960,6 @@ console.log('[App] GTFS data received from main process');
     lastStopsDataHash = null;
     state.routeProfiles = {};
     state.canonicalMasterLists = {};
-    
-    // Generate available dates
-    console.log('[App] Generating available dates...');
-    const dates = generateAvailableDates(
-      state.gtfsData.calendar,
-      state.gtfsData.calendarDates
-    );
-    state.availableDates = dates;
-    
-    // Select default date (today or nearest)
-    if (dates.length > 0) {
-      const today = new Date();
-      const todayStr = today.getFullYear() + 
-        String(today.getMonth() + 1).padStart(2, '0') + 
-        String(today.getDate()).padStart(2, '0');
-      
-      let selectedDate = null;
-      
-      if (dates.some(d => d.value === todayStr)) {
-        selectedDate = todayStr;
-      } else {
-        const earlierDates = dates.filter(d => d.value <= todayStr);
-        if (earlierDates.length > 0) {
-          selectedDate = earlierDates[earlierDates.length - 1].value;
-        } else {
-          selectedDate = dates[0].value;
-        }
-      }
-      
-      state.selectedDate = selectedDate;
-    }
-    
-    // Auto-select route if only one
-    if (state.gtfsData.routes.length === 1) {
-      state.selectedRoute = state.gtfsData.routes[0];
-      const routeTrips = state.gtfsData.tripsIndex[state.selectedRoute.route_id] || [];
-      if (routeTrips.length > 0) {
-        state.selectedDirection = [...new Set(routeTrips.map(t => t.direction_id || '0'))][0];
-      }
-    }
     
     state.loading = false;
     state.loadingStep = '';
@@ -2049,6 +1977,46 @@ console.log('[App] GTFS data received from main process');
     state.loadingProgressPercent = 0;
     render();
   }
+}
+
+async function loadRoutesForUI() {
+  const routes = await window.electronAPI.queryRoutes();
+  const grouped = {};
+  routes.forEach(r => {
+    const key = r.agency_name || 'Unknown';
+    if (!grouped[key]) grouped[key] = [];
+    r.icon = getRouteIcon(r.route_type);
+    r.colorStyle = r.route_color ? `background: #${r.route_color}` : '';
+    grouped[key].push(r);
+  });
+  state.gtfsData.logicalRoutes = grouped;
+  state.gtfsData.routes = routes;
+}
+
+async function loadAvailableDates() {
+  const ranges = await window.electronAPI.queryAvailableDates();
+  const dates = new Set();
+  ranges.forEach(r => {
+    let cur = r.start_date;
+    while (cur <= r.end_date) {
+      dates.add(cur);
+      const d = new Date(parseInt(cur.substr(0,4)), parseInt(cur.substr(4,2))-1, parseInt(cur.substr(6,2)));
+      d.setDate(d.getDate() + 1);
+      cur = d.toISOString().substr(0,10).replace(/-/g,'');
+    }
+  });
+  const availableDatesArray = Array.from(dates).sort();
+  state.availableDates = availableDatesArray.map(d => ({ value: d, label: formatDateLabel(d) }));
+  const today = new Date().toISOString().substr(0,10).replace(/-/g,'');
+  state.selectedDate = dates.has(today) ? today : availableDatesArray[0];
+}
+
+function formatDateLabel(dateStr) {
+  if (!dateStr || dateStr.length !== 8) return dateStr;
+  const year = dateStr.substr(0, 4);
+  const month = dateStr.substr(4, 2);
+  const day = dateStr.substr(6, 2);
+  return `${day}.${month}.${year}`;
 }
 
     function cancelParsing() {
@@ -4648,7 +4616,7 @@ btn.innerHTML = `
   renderRouteTable();
 }
 
-function selectRoute(route) {
+async function selectRoute(route) {
   const container = document.querySelector('#routes-list-container');
   if (container) {
     state.routesListScrollPosition = container.scrollTop || 0;
@@ -4662,29 +4630,15 @@ function selectRoute(route) {
     state.selectedRouteGroup = null;
   }
 
-  const routeTrips = state.gtfsData.tripsIndex[route.route_id] || [];
-  if (routeTrips.length > 0) {
-    state.selectedDirection = [...new Set(routeTrips.map(t => t.direction_id || '0'))][0];
-  }
+  // Set default direction to 0 for now
+  state.selectedDirection = '0';
 
   // Invalidate canonical cache when route changes
   invalidateCanonicalCacheForCurrentSelection();
 
-  // Preload stop_times for this route if using IndexedDB
-  if (state.gtfsData.stopTimesDB) {
-    const tripIds = routeTrips.map(t => t.trip_id);
-    preloadStopTimesForTrips(tripIds, (loaded, total, percent) => {
-      state.loadingStep = `Ładowanie danych trasy... ${loaded}/${total}`;
-      state.loadingProgressPercent = percent;
-    }).then(() => {
-      state.loadingStep = '';
-      resetMap();
-      render();
-    });
-  } else {
-    resetMap();
-    render();
-  }
+  // Reset map and render
+  resetMap();
+  render();
 }
 
 // ═══════════════════════════════════════════════════════════════
