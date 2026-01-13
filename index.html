@@ -7355,10 +7355,10 @@ $('date-select')?.addEventListener('change', async (e) => {
 
 if (state.gtfsData && !state.selectedRoute && !state.showStopsView) {
   // Defer route table rendering to avoid blocking UI on initial load
-  // Use setTimeout to allow the main render to complete first
-  setTimeout(() => {
+  // Use requestAnimationFrame to allow the main render to complete first
+  requestAnimationFrame(() => {
     renderRouteTable();
-  }, 0);
+  });
   // Restore scroll position after rendering routes list
   if (state.routesListScrollPosition !== undefined && state.routesListScrollPosition > 0) {
     setTimeout(() => {
