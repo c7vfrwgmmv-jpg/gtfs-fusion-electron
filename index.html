@@ -5348,58 +5348,20 @@ function renderVirtualStopsList(groupsToRender) {
 let cachedStopToRoutesMap = null;
 let cachedStopToRoutesHash = null;
 
-// Build stop-to-routes mapping with chunked processing to prevent UI freeze
-async function buildStopToRoutesMapAsync(routes, tripsIndex, stopTimesIndex, onProgress) {
-  const stopToRoutes = new Map();
-  const CHUNK_SIZE = 20; // Process 20 routes at a time
-  
-  for (let i = 0; i < routes.length; i += CHUNK_SIZE) {
-    const routeChunk = routes.slice(i, i + CHUNK_SIZE);
-    
-    routeChunk.forEach(route => {
-      const trips = tripsIndex[route.route_id] || [];
-      const stopIds = new Set();
-      
-      trips.forEach(trip => {
-        const stopTimes = stopTimesIndex[trip.trip_id] || [];
-        stopTimes.forEach(st => stopIds.add(st.stop_id));
-      });
-      
-      stopIds.forEach(stopId => {
-        if (!stopToRoutes.has(stopId)) stopToRoutes.set(stopId, []);
-        stopToRoutes.get(stopId).push(route);
-      });
-    });
-    
-    // Report progress
-    if (onProgress) {
-      const percent = Math.round(((i + routeChunk.length) / routes.length) * 100);
-      onProgress(i + routeChunk.length, routes.length, percent);
-    }
-    
-    // Yield to browser to keep UI responsive
-    if (i + CHUNK_SIZE < routes.length) {
-      await new Promise(resolve => setTimeout(resolve, 0));
-    }
+// Get stops with routes from SQL
+async function getStopsWithRoutes() {
+  try {
+    const stopsWithRoutes = await window.electronAPI.queryStopsWithRoutes();
+    return stopsWithRoutes;
+  } catch (err) {
+    console.error('[getStopsWithRoutes] SQL query failed:', err);
+    // Fallback: return stops without route information
+    return Object.values(state.gtfsData.stopsIndex).map(stop => ({
+      ...stop,
+      routes: [],
+      routeCount: 0
+    }));
   }
-  
-  return stopToRoutes;
-}
-
-// Get or build stop-to-routes mapping with caching
-async function getStopToRoutesMap(routes, tripsIndex, stopTimesIndex, onProgress) {
-  const currentHash = routes.length + '_' + Object.keys(tripsIndex).length;
-  
-  if (cachedStopToRoutesMap && cachedStopToRoutesHash === currentHash) {
-    return cachedStopToRoutesMap;
-  }
-  
-  const stopToRoutes = await buildStopToRoutesMapAsync(routes, tripsIndex, stopTimesIndex, onProgress);
-  
-  cachedStopToRoutesMap = stopToRoutes;
-  cachedStopToRoutesHash = currentHash;
-  
-  return stopToRoutes;
 }
 
 function clearStopToRoutesCache() {
@@ -5420,31 +5382,11 @@ async function renderStopsView() {
     return;
   }
   
-  // Show loading indicator for initial data preparation
-  const isInitialLoad = !cachedStopToRoutesMap;
-  if (isInitialLoad) {
-    stopsList.innerHTML = '<div class="p-4 text-center text-gray-600">Przygotowywanie danych przystanków...</div>';
-  }
+  // Show loading indicator
+  stopsList.innerHTML = '<div class="p-4 text-center text-gray-600">Ładowanie przystanków...</div>';
   
-  const stopToRoutes = await getStopToRoutesMap(
-    state.gtfsData.routes,
-    state.gtfsData.tripsIndex,
-    getStopTimesIndexOrCache(),
-    isInitialLoad ? (processed, total, percent) => {
-      stopsList.innerHTML = `<div class="p-4 text-center text-gray-600">Przygotowywanie danych przystanków... ${percent}%</div>`;
-    } : null
-  );
-  
-  const stopsData = [];
-  Object.values(state.gtfsData.stopsIndex).forEach(stop => {
-    const routes = stopToRoutes.get(stop.stop_id) || [];
-    // Show ALL stops, even those without routes (Bug #3 fix)
-    stopsData.push({
-      ...stop,
-      routeCount: routes.length,
-      routes: routes
-    });
-  });
+  // Get stops with routes from SQL
+  const stopsData = await getStopsWithRoutes();
   
   // Sortuj alfabetycznie
   stopsData.sort((a, b) => (a.stop_name || '').localeCompare(b.stop_name || ''));

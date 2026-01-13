@@ -43,6 +43,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Query routes at a stop
   queryRoutesAtStop: (params) => ipcRenderer.invoke('query-routes-at-stop', params),
   
+  // Query all stops with their routes (no date filter)
+  queryStopsWithRoutes: () => ipcRenderer.invoke('query-stops-with-routes'),
+  
   // Listen to load progress updates
   onLoadProgress: (callback) => {
     const subscription = (event, data) => callback(data);

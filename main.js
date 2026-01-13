@@ -1137,6 +1137,94 @@ ipcMain.handle('query-routes-at-stop', async (event, { stopId, date }) => {
   }
 });
 
+// Query all stops with their routes (no date filter)
+ipcMain.handle('query-stops-with-routes', async () => {
+  if (!db) throw new Error('Database not loaded');
+  
+  const conn = db.connect();
+  
+  try {
+    console.log('[SQL] query-stops-with-routes START');
+    
+    const query = `
+      SELECT 
+        s.stop_id,
+        s.stop_name,
+        s.stop_lat,
+        s.stop_lon,
+        s.parent_station,
+        r.route_id,
+        r.route_short_name,
+        r.route_long_name,
+        r.route_type
+      FROM stops s
+      LEFT JOIN stop_times st ON s.stop_id = st.stop_id
+      LEFT JOIN trips t ON st.trip_id = t.trip_id
+      LEFT JOIN routes r ON t.route_id = r.route_id
+      GROUP BY s.stop_id, s.stop_name, s.stop_lat, s.stop_lon, s.parent_station, 
+               r.route_id, r.route_short_name, r.route_long_name, r.route_type
+      ORDER BY s.stop_name
+    `;
+    
+    const rows = await new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('Query timeout')), 60000); // 60s for large datasets
+      conn.all(query, (err, rows) => {
+        clearTimeout(timeout);
+        if (err) {
+          console.error('[SQL] query-stops-with-routes ERROR:', err);
+          reject(err);
+        } else {
+          resolve(rows);
+        }
+      });
+    });
+    
+    console.log('[SQL] query-stops-with-routes SUCCESS:', rows.length, 'rows');
+    
+    // Group routes by stop
+    const stopsMap = new Map();
+    rows.forEach(row => {
+      if (!stopsMap.has(row.stop_id)) {
+        stopsMap.set(row.stop_id, {
+          stop_id: row.stop_id,
+          stop_name: row.stop_name,
+          stop_lat: row.stop_lat,
+          stop_lon: row.stop_lon,
+          parent_station: row.parent_station,
+          routes: []
+        });
+      }
+      
+      // Add route if it exists (some stops might not have routes)
+      if (row.route_id) {
+        const stop = stopsMap.get(row.stop_id);
+        // Check if route already added (due to multiple trips)
+        if (!stop.routes.find(r => r.route_id === row.route_id)) {
+          stop.routes.push({
+            route_id: row.route_id,
+            route_short_name: row.route_short_name,
+            route_long_name: row.route_long_name,
+            route_type: row.route_type
+          });
+        }
+      }
+    });
+    
+    const result = Array.from(stopsMap.values()).map(stop => ({
+      ...stop,
+      routeCount: stop.routes.length
+    }));
+    
+    return convertBigIntsToNumbers(result);
+    
+  } catch (err) {
+    console.error('[SQL] query-stops-with-routes FAILED:', err);
+    throw err;
+  } finally {
+    conn.close();
+  }
+});
+
 // ════════════════════════════════════════════════════════════════
 // APP LIFECYCLE
 // ════════════════════════════════════════════════════════════════
