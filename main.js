@@ -414,7 +414,7 @@ ipcMain.handle('query-routes', async () => {
     `;
     
     // Execute main query with timeout
-    const rows = await new Promise((resolve, reject) => {
+    const rows = new Promise((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error('Query timeout')), 10000);
       conn.all(query, (err, rows) => {
         clearTimeout(timeout);
@@ -739,5 +739,6 @@ app.on('quit', async () => {
   if (db) await new Promise((resolve) => db.close(resolve));
 
 });
+
 
 
