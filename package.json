@@ -17,6 +17,7 @@
     "@zip.js/zip.js": "^2.8.14",
     "adm-zip": "^0.5.16",
     "duckdb": "^1.4.3",
+    "duckdb-async": "^1.0.0",
     "fflate": "^0.8.2",
     "jszip": "^3.10.1",
     "yauzl": "^3.2.0"
