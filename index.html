@@ -7231,6 +7231,7 @@ case VIEW.LOADING:
         departures.push({
           route: routesAtStop.get(d.route_id),
           trip: { trip_id: d.trip_id },
+          trip_id: d.trip_id,
           time: d.departure_time,
           timeMinutes: Utils.timeToMinutes(d.departure_time),
           headsign: d.trip_headsign || ''
@@ -7764,31 +7765,47 @@ $('date-select-stop')?.addEventListener('change', async (e) => {
     filterStopDetailMapLayers(state.stopViewFilteredRoutes);
   }
   
-  const activeServices = getServicesForDate(state.selectedDate);
   const departures = [];
   const routesAtStop = new Map();
   
-  state.gtfsData.routes.forEach(route => {
-    const trips = state.gtfsData.tripsIndex[route.route_id] || [];
-    trips.forEach(trip => {
-      if (!activeServices.includes(trip.service_id)) return;
-      const stopTimes = getStopTimesIndexOrCache()[trip.trip_id] || [];
-      const stopTime = stopTimes.find(st => st.stop_id === state.selectedStop.stop_id);
-      if (stopTime) {
-        const departureTime = stopTime.departure_time || stopTime.arrival_time;
-        if (departureTime) {
-          departures.push({
-            route: route,
-            trip: trip,
-            time: departureTime,
-            timeMinutes: Utils.timeToMinutes(departureTime),
-            headsign: trip.trip_headsign || ''
-          });
-          if (!routesAtStop.has(route.route_id)) routesAtStop.set(route.route_id, route);
-        }
-      }
+  try {
+    // Use SQL to get all routes at this stop
+    const routesData = await window.electronAPI.queryRoutesAtStop({
+      stopId: state.selectedStop.stop_id,
+      date: state.selectedDate
     });
-  });
+    
+    // Build routes map
+    routesData.forEach(routeData => {
+      const route = {
+        route_id: routeData.route_id,
+        route_short_name: routeData.route_short_name,
+        route_long_name: routeData.route_long_name,
+        route_type: routeData.route_type
+      };
+      routesAtStop.set(route.route_id, route);
+    });
+    
+    // Get all departures from SQL
+    const sqlDepartures = await window.electronAPI.queryDeparturesForStop({
+      stopId: state.selectedStop.stop_id,
+      date: state.selectedDate
+    });
+    
+    sqlDepartures.forEach(d => {
+      departures.push({
+        route: routesAtStop.get(d.route_id),
+        trip: { trip_id: d.trip_id },
+        trip_id: d.trip_id,
+        time: d.departure_time,
+        timeMinutes: Utils.timeToMinutes(d.departure_time),
+        headsign: d.trip_headsign || ''
+      });
+    });
+    
+  } catch (err) {
+    console.error('[Stop detail date change] SQL error:', err);
+  }
   
   departures.sort((a, b) => a.timeMinutes - b.timeMinutes);
   state.stopDetailDepartures = departures;
