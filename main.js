@@ -136,7 +136,18 @@ async function buildDatabaseFromZip(zipPath, dbPath, metaPath, hash, sendProgres
     
     sendProgress('Creating database...', 10);
     
+    // Close existing database connection if any
     if (db) await new Promise((resolve) => db.close(resolve));
+    
+    // Remove database file if it exists (from partial/failed previous load)
+    if (fs.existsSync(dbPath)) {
+      try {
+        fs.unlinkSync(dbPath);
+        console.log('[DB] Removed existing database file');
+      } catch (err) {
+        console.warn('[DB] Could not remove existing database file:', err);
+      }
+    }
     
     db = await new Promise((resolve, reject) => {
       const database = new duckdb.Database(dbPath, (err) => {
