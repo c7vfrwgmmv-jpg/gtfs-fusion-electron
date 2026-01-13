@@ -883,6 +883,35 @@ function getStopTimesIndexOrCache() {
   return {};
 }
 
+// Async helper to ensure stop times are loaded for a trip
+async function ensureStopTimesLoaded(tripId) {
+  if (!state.gtfsData.stopTimesIndex) state.gtfsData.stopTimesIndex = {};
+  if (!state.gtfsData.stopsIndex) state.gtfsData.stopsIndex = {};
+  
+  if (!state.gtfsData.stopTimesIndex[tripId]) {
+    try {
+      const stopTimes = await window.electronAPI.queryStopTimes(tripId);
+      state.gtfsData.stopTimesIndex[tripId] = stopTimes;
+      
+      // Also populate stopsIndex from stop times
+      stopTimes.forEach(st => {
+        if (st.stop_id && !state.gtfsData.stopsIndex[st.stop_id]) {
+          state.gtfsData.stopsIndex[st.stop_id] = {
+            stop_id: st.stop_id,
+            stop_name: st.stop_name,
+            stop_lat: st.stop_lat,
+            stop_lon: st.stop_lon
+          };
+        }
+      });
+    } catch (err) {
+      console.error('[App] Error loading stop times for trip', tripId, err);
+      state.gtfsData.stopTimesIndex[tripId] = [];
+    }
+  }
+  return state.gtfsData.stopTimesIndex[tripId] || [];
+}
+
 // Preload stop_times for a list of trips into cache
 async function preloadStopTimesForTrips(tripIds, onProgress) {
   if (!state.gtfsData.stopTimesDB) return; // RAM mode doesn't need preloading
@@ -4625,30 +4654,9 @@ async function selectRoute(routeId, directionId) {
     state.selectedRoute = (state.gtfsData.routes || []).find(r => r.route_id === routeId);
     state.selectedDirection = directionId || '0';
     
-    // Load stop times for all trips to populate cache
-    state.loadingStep = 'Loading stop times...';
-    render();
-    
+    // Initialize indexes if needed
     if (!state.gtfsData.stopTimesIndex) state.gtfsData.stopTimesIndex = {};
-    for (const trip of trips) {
-      if (!state.gtfsData.stopTimesIndex[trip.trip_id]) {
-        const stopTimes = await window.electronAPI.queryStopTimes(trip.trip_id);
-        state.gtfsData.stopTimesIndex[trip.trip_id] = stopTimes;
-        
-        // Also populate stopsIndex from stop times
-        if (!state.gtfsData.stopsIndex) state.gtfsData.stopsIndex = {};
-        stopTimes.forEach(st => {
-          if (st.stop_id && !state.gtfsData.stopsIndex[st.stop_id]) {
-            state.gtfsData.stopsIndex[st.stop_id] = {
-              stop_id: st.stop_id,
-              stop_name: st.stop_name,
-              stop_lat: st.stop_lat,
-              stop_lon: st.stop_lon
-            };
-          }
-        });
-      }
-    }
+    if (!state.gtfsData.stopsIndex) state.gtfsData.stopsIndex = {};
     
     state.loading = false;
     state.loadingStep = '';
