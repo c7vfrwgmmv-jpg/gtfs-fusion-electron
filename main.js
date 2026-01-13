@@ -563,6 +563,48 @@ async function loadGTFSFile(filePath) {
       calendarDatesByDateIndex.get(cd.date).push(cd);
     });
     
+    // 6.5 BUILD STOP-TO-ROUTES MAPPING
+    // This helps the renderer show all stops with their serving routes
+    // without needing to load all stop_times into memory
+    sendProgress('Building stop-to-routes index...', 97);
+    console.log('[Main] Building stop-to-routes index...');
+    
+    const stopToRoutes = {};
+    
+    // For each route, find all stops it serves
+    routes.forEach(route => {
+      const routeTrips = tripsIndex[route.route_id] || [];
+      const routeStops = new Set();
+      
+      // Collect all stops from this route's trips
+      routeTrips.forEach(trip => {
+        const tripStopTimes = stopTimesIndex[trip.trip_id] || [];
+        tripStopTimes.forEach(st => {
+          if (st.stop_id) {
+            routeStops.add(st.stop_id);
+          }
+        });
+      });
+      
+      // Add this route to each stop's route list
+      routeStops.forEach(stopId => {
+        if (!stopToRoutes[stopId]) {
+          stopToRoutes[stopId] = [];
+        }
+        // Store minimal route info to reduce data size
+        stopToRoutes[stopId].push({
+          route_id: route.route_id,
+          route_short_name: route.route_short_name,
+          route_long_name: route.route_long_name,
+          route_type: route.route_type,
+          route_color: route.route_color,
+          route_text_color: route.route_text_color
+        });
+      });
+    });
+    
+    console.log(`[Main] Built stop-to-routes mapping for ${Object.keys(stopToRoutes).length} stops`);
+    
     // 7. PREPARE FINAL DATA
     const gtfsData = {
       routes,
@@ -571,6 +613,7 @@ async function loadGTFSFile(filePath) {
       stopsIndex,
       tripsIndex,
       stopTimesIndex,
+      stopToRoutes, // Add the stop-to-routes mapping
       calendar,
       calendarDates,
       calendarDatesByDateIndex: Array.from(calendarDatesByDateIndex.entries()), // Convert Map to Array for IPC

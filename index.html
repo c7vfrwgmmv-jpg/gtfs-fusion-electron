@@ -5043,20 +5043,32 @@ async function renderStopsView() {
   const stopsMap = $('stops-map');
   if (!stopsList || !stopsMap) return;
   
-  // Show loading indicator for initial data preparation
-  const isInitialLoad = !cachedStopToRoutesMap;
-  if (isInitialLoad) {
-    stopsList.innerHTML = '<div class="p-4 text-center text-gray-600">Przygotowywanie danych przystanków...</div>';
+  // Use pre-built stop-to-routes mapping if available (fast path)
+  let stopToRoutes;
+  if (state.gtfsData.stopToRoutes) {
+    console.log('[RenderStops] Using pre-built stop-to-routes mapping');
+    // Convert object to Map for consistency with old code
+    stopToRoutes = new Map();
+    Object.keys(state.gtfsData.stopToRoutes).forEach(stopId => {
+      stopToRoutes.set(stopId, state.gtfsData.stopToRoutes[stopId]);
+    });
+  } else {
+    // Fallback: build mapping on demand (slow path for backward compatibility)
+    console.log('[RenderStops] Building stop-to-routes mapping (this may take a while)...');
+    const isInitialLoad = !cachedStopToRoutesMap;
+    if (isInitialLoad) {
+      stopsList.innerHTML = '<div class="p-4 text-center text-gray-600">Przygotowywanie danych przystanków...</div>';
+    }
+    
+    stopToRoutes = await getStopToRoutesMap(
+      state.gtfsData.routes,
+      state.gtfsData.tripsIndex,
+      getStopTimesIndexOrCache(),
+      isInitialLoad ? (processed, total, percent) => {
+        stopsList.innerHTML = `<div class="p-4 text-center text-gray-600">Przygotowywanie danych przystanków... ${percent}%</div>`;
+      } : null
+    );
   }
-  
-  const stopToRoutes = await getStopToRoutesMap(
-    state.gtfsData.routes,
-    state.gtfsData.tripsIndex,
-    getStopTimesIndexOrCache(),
-    isInitialLoad ? (processed, total, percent) => {
-      stopsList.innerHTML = `<div class="p-4 text-center text-gray-600">Przygotowywanie danych przystanków... ${percent}%</div>`;
-    } : null
-  );
   
   const stopsData = [];
   Object.values(state.gtfsData.stopsIndex).forEach(stop => {
