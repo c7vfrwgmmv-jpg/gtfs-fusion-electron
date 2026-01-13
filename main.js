@@ -194,7 +194,10 @@ async function buildDatabaseFromZip(zipPath, dbPath, metaPath, hash, sendProgres
           header=true,
           ignore_errors=true,
           nullstr='',
-          sample_size=100000
+          delim=',',
+          quote='"',
+          sample_size=100000,
+          all_varchar=true
         )
       `);
       
@@ -303,18 +306,30 @@ ipcMain.handle('load-gtfs-file', async (event, filePath) => {
   }
 });
 
-// Helper function to convert BigInt values to Numbers for IPC serialization
+// Helper function to convert BigInt values to Numbers and handle non-serializable types for IPC
 function convertBigIntsToNumbers(obj) {
   if (obj === null || obj === undefined) return obj;
   if (typeof obj === 'bigint') return Number(obj);
+  if (typeof obj === 'function') return undefined;
+  if (typeof obj === 'symbol') return undefined;
+  
   if (Array.isArray(obj)) return obj.map(convertBigIntsToNumbers);
+  
   if (typeof obj === 'object') {
+    // Handle special object types
+    if (obj instanceof Date) return obj.toISOString();
+    if (obj instanceof Buffer) return obj.toString('utf8');
+    
     const result = {};
     for (const key in obj) {
-      result[key] = convertBigIntsToNumbers(obj[key]);
+      const value = obj[key];
+      // Skip non-serializable values
+      if (typeof value === 'function' || typeof value === 'symbol') continue;
+      result[key] = convertBigIntsToNumbers(value);
     }
     return result;
   }
+  
   return obj;
 }
 
@@ -361,7 +376,7 @@ ipcMain.handle('query-trips', async (event, { routeId, date, directionId }) => {
         SELECT service_id FROM calendar_dates WHERE date = ? AND exception_type = '2'
       )
       SELECT t.*,
-        (SELECT departure_time FROM stop_times WHERE trip_id = t.trip_id ORDER BY stop_sequence ASC LIMIT 1) as first_departure
+        (SELECT departure_time FROM stop_times WHERE trip_id = t.trip_id ORDER BY CAST(stop_sequence AS INTEGER) ASC LIMIT 1) as first_departure
       FROM trips t
       WHERE t.route_id = ? AND t.direction_id = ? AND t.service_id IN (SELECT service_id FROM active_services)
       ORDER BY first_departure
@@ -381,7 +396,7 @@ ipcMain.handle('query-stop-times', async (event, tripId) => {
       FROM stop_times st
       JOIN stops s ON st.stop_id = s.stop_id
       WHERE st.trip_id = ?
-      ORDER BY st.stop_sequence
+      ORDER BY CAST(st.stop_sequence AS INTEGER)
     `, [tripId], (err, rows) => {
       if (err) return reject(err);
       resolve(convertBigIntsToNumbers(rows || []));
@@ -394,7 +409,7 @@ ipcMain.handle('query-shape', async (event, shapeId) => {
   return new Promise((resolve, reject) => {
     const conn = db.connect();
     conn.all(`
-      SELECT shape_pt_lat, shape_pt_lon FROM shapes WHERE shape_id = ? ORDER BY shape_pt_sequence
+      SELECT shape_pt_lat, shape_pt_lon FROM shapes WHERE shape_id = ? ORDER BY CAST(shape_pt_sequence AS INTEGER)
     `, [shapeId], (err, rows) => {
       if (err) return reject(err);
       const converted = convertBigIntsToNumbers(rows || []);
