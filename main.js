@@ -245,7 +245,7 @@ async function buildDatabaseFromZip(zipPath, dbPath, metaPath, hash, sendProgres
     };
     fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2));
     
-    sendProgress('Complete!', 100);
+    sendProgress('Database loaded, preparing UI...', 95);
     
     console.log(`[DB] Built in ${((Date.now() - startTime) / 1000).toFixed(1)}s`);
     return { success: true, fromCache: false, stats };
@@ -335,54 +335,79 @@ function convertBigIntsToNumbers(obj) {
 
 ipcMain.handle('query-routes', async () => {
   if (!db) throw new Error('Database not loaded');
-  return new Promise((resolve, reject) => {
-    const conn = db.connect();
+  
+  const conn = db.connect();
+  
+  try {
+    console.log('[SQL] query-routes START');
     
-    // First, get the actual columns that exist in the routes table
-    conn.all(`SELECT column_name FROM information_schema.columns WHERE table_name = 'routes'`, (err, columns) => {
-      if (err) return reject(err);
-      
-      const columnSet = new Set(columns.map(c => c.column_name.toLowerCase()));
-      
-      // Build SELECT clause with only existing columns
-      const selectClauses = ['r.route_id'];
-      
-      // Required columns (should always exist)
-      if (columnSet.has('route_short_name')) selectClauses.push('ANY_VALUE(r.route_short_name) as route_short_name');
-      if (columnSet.has('route_long_name')) selectClauses.push('ANY_VALUE(r.route_long_name) as route_long_name');
-      if (columnSet.has('route_type')) selectClauses.push('ANY_VALUE(r.route_type) as route_type');
-      
-      // Optional columns
-      if (columnSet.has('agency_id')) selectClauses.push('ANY_VALUE(r.agency_id) as agency_id');
-      if (columnSet.has('route_desc')) selectClauses.push('ANY_VALUE(r.route_desc) as route_desc');
-      if (columnSet.has('route_url')) selectClauses.push('ANY_VALUE(r.route_url) as route_url');
-      if (columnSet.has('route_color')) selectClauses.push('ANY_VALUE(r.route_color) as route_color');
-      if (columnSet.has('route_text_color')) selectClauses.push('ANY_VALUE(r.route_text_color) as route_text_color');
-      
-      selectClauses.push('COALESCE(ANY_VALUE(a.agency_name), \'Unknown\') as agency_name');
-      selectClauses.push('COUNT(DISTINCT t.trip_id) as trip_count');
-      
-      const query = `
-        SELECT ${selectClauses.join(', ')}
-        FROM routes r
-        LEFT JOIN agency a ON r.agency_id = a.agency_id
-        LEFT JOIN trips t ON r.route_id = t.route_id
-        GROUP BY r.route_id
-        ORDER BY ANY_VALUE(r.route_short_name)
-      `;
-      
+    // Get columns with timeout
+    const columns = await new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('Query timeout getting columns')), 10000);
+      conn.all(`SELECT column_name FROM information_schema.columns WHERE table_name = 'routes'`, 
+        (err, rows) => {
+          clearTimeout(timeout);
+          err ? reject(err) : resolve(rows);
+        });
+    });
+    
+    const columnSet = new Set(columns.map(c => c.column_name.toLowerCase()));
+    
+    // Build SELECT clause with only existing columns
+    const selectClauses = ['r.route_id'];
+    
+    // Required columns (should always exist)
+    if (columnSet.has('route_short_name')) selectClauses.push('ANY_VALUE(r.route_short_name) as route_short_name');
+    if (columnSet.has('route_long_name')) selectClauses.push('ANY_VALUE(r.route_long_name) as route_long_name');
+    if (columnSet.has('route_type')) selectClauses.push('ANY_VALUE(r.route_type) as route_type');
+    
+    // Optional columns
+    if (columnSet.has('agency_id')) selectClauses.push('ANY_VALUE(r.agency_id) as agency_id');
+    if (columnSet.has('route_desc')) selectClauses.push('ANY_VALUE(r.route_desc) as route_desc');
+    if (columnSet.has('route_url')) selectClauses.push('ANY_VALUE(r.route_url) as route_url');
+    if (columnSet.has('route_color')) selectClauses.push('ANY_VALUE(r.route_color) as route_color');
+    if (columnSet.has('route_text_color')) selectClauses.push('ANY_VALUE(r.route_text_color) as route_text_color');
+    
+    selectClauses.push('COALESCE(ANY_VALUE(a.agency_name), \'Unknown\') as agency_name');
+    selectClauses.push('COUNT(DISTINCT t.trip_id) as trip_count');
+    
+    const query = `
+      SELECT ${selectClauses.join(', ')}
+      FROM routes r
+      LEFT JOIN agency a ON r.agency_id = a.agency_id
+      LEFT JOIN trips t ON r.route_id = t.route_id
+      GROUP BY r.route_id
+      ORDER BY ANY_VALUE(r.route_short_name)
+    `;
+    
+    // Execute main query with timeout
+    const rows = await new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('Query timeout')), 10000);
       conn.all(query, (err, rows) => {
-        if (err) return reject(err);
-        resolve(convertBigIntsToNumbers(rows || []));
+        clearTimeout(timeout);
+        err ? reject(err) : resolve(rows);
       });
     });
-  });
+    
+    console.log('[SQL] query-routes SUCCESS:', rows.length, 'rows');
+    return convertBigIntsToNumbers(rows || []);
+    
+  } catch (err) {
+    console.error('[SQL] query-routes FAILED:', err);
+    throw err;
+  } finally {
+    conn.close();
+  }
 });
 
 ipcMain.handle('query-trips', async (event, { routeId, date, directionId }) => {
   if (!db) throw new Error('Database not loaded');
-  return new Promise((resolve, reject) => {
-    const conn = db.connect();
+  
+  const conn = db.connect();
+  
+  try {
+    console.log('[SQL] query-trips START');
+    
     const dateObj = new Date(
       parseInt(date.substring(0, 4)),
       parseInt(date.substring(4, 6)) - 1,
@@ -391,125 +416,196 @@ ipcMain.handle('query-trips', async (event, { routeId, date, directionId }) => {
     const dayNames = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
     const dayColumn = dayNames[dateObj.getDay()];
     
-    // First, get the actual columns that exist in the trips table
-    conn.all(`SELECT column_name FROM information_schema.columns WHERE table_name = 'trips'`, (err, columns) => {
-      if (err) return reject(err);
-      
-      const columnSet = new Set(columns.map(c => c.column_name.toLowerCase()));
-      
-      // Build SELECT clause with only existing columns
-      const selectClauses = [];
-      
-      // Required columns
-      if (columnSet.has('route_id')) selectClauses.push('t.route_id');
-      if (columnSet.has('service_id')) selectClauses.push('t.service_id');
-      if (columnSet.has('trip_id')) selectClauses.push('t.trip_id');
-      
-      // Optional columns
-      if (columnSet.has('trip_headsign')) selectClauses.push('t.trip_headsign');
-      if (columnSet.has('trip_short_name')) selectClauses.push('t.trip_short_name');
-      if (columnSet.has('direction_id')) selectClauses.push('t.direction_id');
-      if (columnSet.has('block_id')) selectClauses.push('t.block_id');
-      if (columnSet.has('shape_id')) selectClauses.push('t.shape_id');
-      if (columnSet.has('wheelchair_accessible')) selectClauses.push('t.wheelchair_accessible');
-      if (columnSet.has('bikes_allowed')) selectClauses.push('t.bikes_allowed');
-      
-      selectClauses.push('(SELECT departure_time FROM stop_times WHERE trip_id = t.trip_id ORDER BY CAST(stop_sequence AS INTEGER) ASC LIMIT 1) as first_departure');
-      
-      const query = `
-        WITH active_services AS (
-          SELECT service_id FROM calendar
-          WHERE start_date <= ? AND end_date >= ? AND ${dayColumn} = '1'
-          UNION
-          SELECT service_id FROM calendar_dates WHERE date = ? AND exception_type = '1'
-          EXCEPT
-          SELECT service_id FROM calendar_dates WHERE date = ? AND exception_type = '2'
-        )
-        SELECT ${selectClauses.join(', ')}
-        FROM trips t
-        WHERE t.route_id = ? AND t.direction_id = ? AND t.service_id IN (SELECT service_id FROM active_services)
-        ORDER BY first_departure
-      `;
-      
+    // Get columns with timeout
+    const columns = await new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('Query timeout getting columns')), 10000);
+      conn.all(`SELECT column_name FROM information_schema.columns WHERE table_name = 'trips'`, 
+        (err, rows) => {
+          clearTimeout(timeout);
+          err ? reject(err) : resolve(rows);
+        });
+    });
+    
+    const columnSet = new Set(columns.map(c => c.column_name.toLowerCase()));
+    
+    // Build SELECT clause with only existing columns
+    const selectClauses = [];
+    
+    // Required columns
+    if (columnSet.has('route_id')) selectClauses.push('t.route_id');
+    if (columnSet.has('service_id')) selectClauses.push('t.service_id');
+    if (columnSet.has('trip_id')) selectClauses.push('t.trip_id');
+    
+    // Optional columns
+    if (columnSet.has('trip_headsign')) selectClauses.push('t.trip_headsign');
+    if (columnSet.has('trip_short_name')) selectClauses.push('t.trip_short_name');
+    if (columnSet.has('direction_id')) selectClauses.push('t.direction_id');
+    if (columnSet.has('block_id')) selectClauses.push('t.block_id');
+    if (columnSet.has('shape_id')) selectClauses.push('t.shape_id');
+    if (columnSet.has('wheelchair_accessible')) selectClauses.push('t.wheelchair_accessible');
+    if (columnSet.has('bikes_allowed')) selectClauses.push('t.bikes_allowed');
+    
+    selectClauses.push('(SELECT departure_time FROM stop_times WHERE trip_id = t.trip_id ORDER BY CAST(stop_sequence AS INTEGER) ASC LIMIT 1) as first_departure');
+    
+    const query = `
+      WITH active_services AS (
+        SELECT service_id FROM calendar
+        WHERE start_date <= ? AND end_date >= ? AND ${dayColumn} = '1'
+        UNION
+        SELECT service_id FROM calendar_dates WHERE date = ? AND exception_type = '1'
+        EXCEPT
+        SELECT service_id FROM calendar_dates WHERE date = ? AND exception_type = '2'
+      )
+      SELECT ${selectClauses.join(', ')}
+      FROM trips t
+      WHERE t.route_id = ? AND t.direction_id = ? AND t.service_id IN (SELECT service_id FROM active_services)
+      ORDER BY first_departure
+    `;
+    
+    // Execute main query with timeout
+    const rows = await new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('Query timeout')), 10000);
       conn.all(query, [date, date, date, date, routeId, directionId], (err, rows) => {
-        if (err) return reject(err);
-        resolve(convertBigIntsToNumbers(rows || []));
+        clearTimeout(timeout);
+        err ? reject(err) : resolve(rows);
       });
     });
-  });
+    
+    console.log('[SQL] query-trips SUCCESS:', rows.length, 'rows');
+    return convertBigIntsToNumbers(rows || []);
+    
+  } catch (err) {
+    console.error('[SQL] query-trips FAILED:', err);
+    throw err;
+  } finally {
+    conn.close();
+  }
 });
 
 ipcMain.handle('query-stop-times', async (event, tripId) => {
   if (!db) throw new Error('Database not loaded');
-  return new Promise((resolve, reject) => {
-    const conn = db.connect();
+  
+  const conn = db.connect();
+  
+  try {
+    console.log('[SQL] query-stop-times START');
     
-    // First, get the actual columns that exist in stop_times table
-    conn.all(`SELECT column_name FROM information_schema.columns WHERE table_name = 'stop_times'`, (err, columns) => {
-      if (err) return reject(err);
-      
-      const columnSet = new Set(columns.map(c => c.column_name.toLowerCase()));
-      
-      // Build SELECT clause with only existing columns
-      const selectClauses = [];
-      
-      // Required columns
-      if (columnSet.has('trip_id')) selectClauses.push('st.trip_id');
-      if (columnSet.has('arrival_time')) selectClauses.push('st.arrival_time');
-      if (columnSet.has('departure_time')) selectClauses.push('st.departure_time');
-      if (columnSet.has('stop_id')) selectClauses.push('st.stop_id');
-      if (columnSet.has('stop_sequence')) selectClauses.push('st.stop_sequence');
-      
-      // Optional columns
-      if (columnSet.has('stop_headsign')) selectClauses.push('st.stop_headsign');
-      if (columnSet.has('pickup_type')) selectClauses.push('st.pickup_type');
-      if (columnSet.has('drop_off_type')) selectClauses.push('st.drop_off_type');
-      if (columnSet.has('shape_dist_traveled')) selectClauses.push('st.shape_dist_traveled');
-      if (columnSet.has('timepoint')) selectClauses.push('st.timepoint');
-      
-      // Add stop info
-      selectClauses.push('s.stop_name', 's.stop_lat', 's.stop_lon');
-      
-      const query = `
-        SELECT ${selectClauses.join(', ')}
-        FROM stop_times st
-        JOIN stops s ON st.stop_id = s.stop_id
-        WHERE st.trip_id = ?
-        ORDER BY CAST(st.stop_sequence AS INTEGER)
-      `;
-      
+    // Get columns with timeout
+    const columns = await new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('Query timeout getting columns')), 10000);
+      conn.all(`SELECT column_name FROM information_schema.columns WHERE table_name = 'stop_times'`, 
+        (err, rows) => {
+          clearTimeout(timeout);
+          err ? reject(err) : resolve(rows);
+        });
+    });
+    
+    const columnSet = new Set(columns.map(c => c.column_name.toLowerCase()));
+    
+    // Build SELECT clause with only existing columns
+    const selectClauses = [];
+    
+    // Required columns
+    if (columnSet.has('trip_id')) selectClauses.push('st.trip_id');
+    if (columnSet.has('arrival_time')) selectClauses.push('st.arrival_time');
+    if (columnSet.has('departure_time')) selectClauses.push('st.departure_time');
+    if (columnSet.has('stop_id')) selectClauses.push('st.stop_id');
+    if (columnSet.has('stop_sequence')) selectClauses.push('st.stop_sequence');
+    
+    // Optional columns
+    if (columnSet.has('stop_headsign')) selectClauses.push('st.stop_headsign');
+    if (columnSet.has('pickup_type')) selectClauses.push('st.pickup_type');
+    if (columnSet.has('drop_off_type')) selectClauses.push('st.drop_off_type');
+    if (columnSet.has('shape_dist_traveled')) selectClauses.push('st.shape_dist_traveled');
+    if (columnSet.has('timepoint')) selectClauses.push('st.timepoint');
+    
+    // Add stop info
+    selectClauses.push('s.stop_name', 's.stop_lat', 's.stop_lon');
+    
+    const query = `
+      SELECT ${selectClauses.join(', ')}
+      FROM stop_times st
+      JOIN stops s ON st.stop_id = s.stop_id
+      WHERE st.trip_id = ?
+      ORDER BY CAST(st.stop_sequence AS INTEGER)
+    `;
+    
+    // Execute query with timeout
+    const rows = await new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('Query timeout')), 10000);
       conn.all(query, [tripId], (err, rows) => {
-        if (err) return reject(err);
-        resolve(convertBigIntsToNumbers(rows || []));
+        clearTimeout(timeout);
+        err ? reject(err) : resolve(rows);
       });
     });
-  });
+    
+    console.log('[SQL] query-stop-times SUCCESS:', rows.length, 'rows');
+    return convertBigIntsToNumbers(rows || []);
+    
+  } catch (err) {
+    console.error('[SQL] query-stop-times FAILED:', err);
+    throw err;
+  } finally {
+    conn.close();
+  }
 });
 
 ipcMain.handle('query-shape', async (event, shapeId) => {
   if (!db) throw new Error('Database not loaded');
-  return new Promise((resolve, reject) => {
-    const conn = db.connect();
-    conn.all(`
-      SELECT shape_pt_lat, shape_pt_lon FROM shapes WHERE shape_id = ? ORDER BY CAST(shape_pt_sequence AS INTEGER)
-    `, [shapeId], (err, rows) => {
-      if (err) return reject(err);
-      const converted = convertBigIntsToNumbers(rows || []);
-      resolve(converted.map(r => [r.shape_pt_lat, r.shape_pt_lon]));
+  
+  const conn = db.connect();
+  
+  try {
+    console.log('[SQL] query-shape START');
+    
+    const rows = await new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('Query timeout')), 10000);
+      conn.all(`
+        SELECT shape_pt_lat, shape_pt_lon FROM shapes WHERE shape_id = ? ORDER BY CAST(shape_pt_sequence AS INTEGER)
+      `, [shapeId], (err, rows) => {
+        clearTimeout(timeout);
+        err ? reject(err) : resolve(rows);
+      });
     });
-  });
+    
+    console.log('[SQL] query-shape SUCCESS:', rows.length, 'points');
+    const converted = convertBigIntsToNumbers(rows || []);
+    return converted.map(r => [r.shape_pt_lat, r.shape_pt_lon]);
+    
+  } catch (err) {
+    console.error('[SQL] query-shape FAILED:', err);
+    throw err;
+  } finally {
+    conn.close();
+  }
 });
 
 ipcMain.handle('query-available-dates', async () => {
   if (!db) throw new Error('Database not loaded');
-  return new Promise((resolve, reject) => {
-    const conn = db.connect();
-    conn.all(`SELECT DISTINCT start_date, end_date FROM calendar ORDER BY start_date`, 
-      (err, rows) => {
-        if (err) return reject(err);
-        resolve(convertBigIntsToNumbers(rows || []));
-      });
-  });
+  
+  const conn = db.connect();
+  
+  try {
+    console.log('[SQL] query-available-dates START');
+    
+    const rows = await new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('Query timeout')), 10000);
+      conn.all(`SELECT DISTINCT start_date, end_date FROM calendar ORDER BY start_date`, 
+        (err, rows) => {
+          clearTimeout(timeout);
+          err ? reject(err) : resolve(rows);
+        });
+    });
+    
+    console.log('[SQL] query-available-dates SUCCESS:', rows.length, 'ranges');
+    return convertBigIntsToNumbers(rows || []);
+    
+  } catch (err) {
+    console.error('[SQL] query-available-dates FAILED:', err);
+    throw err;
+  } finally {
+    conn.close();
+  }
 });
 
 // ════════════════════════════════════════════════════════════════

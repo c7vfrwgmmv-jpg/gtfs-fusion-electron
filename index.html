@@ -2022,10 +2022,11 @@ async function handleFileUpload(e) {
     state.routeProfiles = {};
     state.canonicalMasterLists = {};
     
+    // NOW show complete after all loading is done
     state.loading = false;
-    state.loadingStep = '';
+    state.loadingStep = 'Complete!';
+    state.loadingProgressPercent = 100;
     state.loadingProgress = 0;
-    state.loadingProgressPercent = 0;
     
     console.log('[App] GTFS loaded successfully!');
     render();
@@ -2041,42 +2042,68 @@ async function handleFileUpload(e) {
 }
 
 async function loadRoutesForUI() {
-  const routes = await window.electronAPI.queryRoutes();
-  const grouped = {};
-  routes.forEach(r => {
-    const key = r.agency_name || 'Unknown';
-    if (!grouped[key]) grouped[key] = [];
-    r.colorStyle = r.route_color ? `background: #${r.route_color}` : '';
-    grouped[key].push(r);
-  });
-  state.gtfsData.logicalRoutes = grouped;
-  state.gtfsData.routes = routes;
+  const timeoutPromise = new Promise((_, reject) => 
+    setTimeout(() => reject(new Error('Timeout loading routes from database')), 15000)
+  );
+  
+  try {
+    const routes = await Promise.race([
+      window.electronAPI.queryRoutes(),
+      timeoutPromise
+    ]);
+    
+    const grouped = {};
+    routes.forEach(r => {
+      const key = r.agency_name || 'Unknown';
+      if (!grouped[key]) grouped[key] = [];
+      r.colorStyle = r.route_color ? `background: #${r.route_color}` : '';
+      grouped[key].push(r);
+    });
+    state.gtfsData.logicalRoutes = grouped;
+    state.gtfsData.routes = routes;
+  } catch (err) {
+    console.error('[App] Error loading routes:', err);
+    throw new Error('Failed to load routes: ' + err.message);
+  }
 }
 
 async function loadAvailableDates() {
-  const ranges = await window.electronAPI.queryAvailableDates();
-  const dates = new Set();
-  ranges.forEach(r => {
-    let cur = String(r.start_date || '');
-    const endDate = String(r.end_date || '');
+  const timeoutPromise = new Promise((_, reject) => 
+    setTimeout(() => reject(new Error('Timeout loading dates from database')), 15000)
+  );
+  
+  try {
+    const ranges = await Promise.race([
+      window.electronAPI.queryAvailableDates(),
+      timeoutPromise
+    ]);
     
-    if (!cur || cur.length !== 8 || !endDate || endDate.length !== 8) return;
-    
-    while (cur <= endDate) {
-      dates.add(cur);
-      const d = new Date(
-        parseInt(cur.substring(0, 4)),
-        parseInt(cur.substring(4, 6)) - 1,
-        parseInt(cur.substring(6, 8))
-      );
-      d.setDate(d.getDate() + 1);
-      cur = d.toISOString().substring(0, 10).replace(/-/g, '');
-    }
-  });
-  const availableDatesArray = Array.from(dates).sort();
-  state.availableDates = availableDatesArray.map(d => ({ value: d, label: formatDateLabel(d) }));
-  const today = new Date().toISOString().substring(0, 10).replace(/-/g, '');
-  state.selectedDate = dates.has(today) ? today : availableDatesArray[0];
+    const dates = new Set();
+    ranges.forEach(r => {
+      let cur = String(r.start_date || '');
+      const endDate = String(r.end_date || '');
+      
+      if (!cur || cur.length !== 8 || !endDate || endDate.length !== 8) return;
+      
+      while (cur <= endDate) {
+        dates.add(cur);
+        const d = new Date(
+          parseInt(cur.substring(0, 4)),
+          parseInt(cur.substring(4, 6)) - 1,
+          parseInt(cur.substring(6, 8))
+        );
+        d.setDate(d.getDate() + 1);
+        cur = d.toISOString().substring(0, 10).replace(/-/g, '');
+      }
+    });
+    const availableDatesArray = Array.from(dates).sort();
+    state.availableDates = availableDatesArray.map(d => ({ value: d, label: formatDateLabel(d) }));
+    const today = new Date().toISOString().substring(0, 10).replace(/-/g, '');
+    state.selectedDate = dates.has(today) ? today : availableDatesArray[0];
+  } catch (err) {
+    console.error('[App] Error loading dates:', err);
+    throw new Error('Failed to load dates: ' + err.message);
+  }
 }
 
 function formatDateLabel(dateStr) {
