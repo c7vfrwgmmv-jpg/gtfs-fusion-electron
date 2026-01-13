@@ -325,12 +325,12 @@ ipcMain.handle('query-routes', async () => {
     conn.all(`
       SELECT 
         r.*,
-        COALESCE(a.agency_name, 'Unknown') as agency_name,
+        COALESCE(ANY_VALUE(a.agency_name), 'Unknown') as agency_name,
         COUNT(DISTINCT t.trip_id) as trip_count
       FROM routes r
       LEFT JOIN agency a ON r.agency_id = a.agency_id
       LEFT JOIN trips t ON r.route_id = t.route_id
-      GROUP BY r.route_id
+      GROUP BY r.route_id, r.agency_id, r.route_short_name, r.route_long_name, r.route_type, r.route_color, r.route_text_color, r.route_desc, r.route_url
       ORDER BY r.route_short_name
     `, (err, rows) => {
       if (err) return reject(err);
