@@ -463,47 +463,48 @@ ipcMain.handle('query-trips', async (event, { routeId, date, directionId }) => {
     let query;
     let params;
     
-    if (hasCalendar && hasCalendarDates) {
-      query = `
-        WITH active_services AS (
-          SELECT service_id FROM calendar
-          WHERE start_date <= ?  AND end_date >= ?  AND ${dayColumn} = '1'
-          UNION
-          SELECT service_id FROM calendar_dates WHERE date = ? AND exception_type = '1'
-          EXCEPT
-          SELECT service_id FROM calendar_dates WHERE date = ? AND exception_type = '2'
-        )
-        SELECT ${selectClauses.join(', ')}
-        FROM trips t
-        WHERE t.route_id = ? AND t.direction_id = ? AND t.service_id IN (SELECT service_id FROM active_services)
-        ORDER BY first_departure
-      `;
-      params = [date, date, date, date, routeId, direction];
-      
-    } else if (hasCalendar) {
-      query = `
-        WITH active_services AS (
-          SELECT service_id FROM calendar
-          WHERE start_date <= ? AND end_date >= ? AND ${dayColumn} = '1'
-        )
-        SELECT ${selectClauses.join(', ')}
-        FROM trips t
-        WHERE t.route_id = ? AND t.direction_id = ? AND t.service_id IN (SELECT service_id FROM active_services)
-        ORDER BY first_departure
-      `;
-      params = [date, date, routeId, direction];
-      
-    } else {
-      console.warn('[SQL] No calendar tables - returning all trips');
-      query = `
-        SELECT ${selectClauses. join(', ')}
-        FROM trips t
-        WHERE t.route_id = ? AND t.direction_id = ? 
-        ORDER BY first_departure
-      `;
-      params = [routeId, direction];
-    }
+if (hasCalendar && hasCalendarDates) {
+  query = `
+    WITH active_services AS (
+      SELECT service_id FROM calendar
+      WHERE start_date <= $1 AND end_date >= $2 AND ${dayColumn} = '1'
+      UNION
+      SELECT service_id FROM calendar_dates WHERE date = $3 AND exception_type = '1'
+      EXCEPT
+      SELECT service_id FROM calendar_dates WHERE date = $4 AND exception_type = '2'
+    )
+    SELECT ${selectClauses. join(', ')}
+    FROM trips t
+    WHERE t.route_id = $5 AND t.direction_id = $6 AND t.service_id IN (SELECT service_id FROM active_services)
+    ORDER BY first_departure
+  `;
+  params = [date, date, date, date, routeId, direction];
+  
+} else if (hasCalendar) {
+  query = `
+    WITH active_services AS (
+      SELECT service_id FROM calendar
+      WHERE start_date <= $1 AND end_date >= $2 AND ${dayColumn} = '1'
+    )
+    SELECT ${selectClauses.join(', ')}
+    FROM trips t
+    WHERE t.route_id = $3 AND t.direction_id = $4 AND t.service_id IN (SELECT service_id FROM active_services)
+    ORDER BY first_departure
+  `;
+  params = [date, date, routeId, direction];
+  
+} else {
+  query = `
+    SELECT ${selectClauses.join(', ')}
+    FROM trips t
+    WHERE t.route_id = $1 AND t.direction_id = $2 
+    ORDER BY first_departure
+  `;
+  params = [routeId, direction];
+}
     
+conn.all(query, ...params, (err, rows) => {
+  
     console.log('[SQL] Query params:', params);
     
     // Execute query
@@ -696,3 +697,4 @@ app.on('quit', async () => {
   if (db) await new Promise((resolve) => db.close(resolve));
 
 });
+
