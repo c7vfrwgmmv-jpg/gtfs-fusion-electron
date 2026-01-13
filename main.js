@@ -693,5 +693,3 @@ app.on('quit', async () => {
   if (db) await new Promise((resolve) => db.close(resolve));
 
 });
-
-
