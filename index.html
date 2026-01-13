@@ -4661,7 +4661,7 @@ function renderRouteTable() {
     const sortedGroups = sortGroupsByRouteId(logicalRoutes);
     
     console.log('[Render] Rendering routes in batches...');
-    await renderBatch(
+	 renderBatch(
       sortedGroups,
       grid,
       (group) => {
