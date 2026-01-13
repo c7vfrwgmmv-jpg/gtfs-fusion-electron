@@ -4658,6 +4658,14 @@ async function selectRoute(routeId, directionId) {
     if (!state.gtfsData.stopTimesIndex) state.gtfsData.stopTimesIndex = {};
     if (!state.gtfsData.stopsIndex) state.gtfsData.stopsIndex = {};
     
+    // Batch load stop times for all trips (more efficient than one-by-one)
+    if (trips.length > 0) {
+      state.loadingStep = `Loading stop times for ${trips.length} trips...`;
+      render();
+      
+      await batchLoadStopTimes(trips.map(t => t.trip_id));
+    }
+    
     state.loading = false;
     state.loadingStep = '';
     render();
@@ -4665,6 +4673,41 @@ async function selectRoute(routeId, directionId) {
     state.error = err.message;
     state.loading = false;
     render();
+  }
+}
+
+// Batch load stop times for multiple trips efficiently
+async function batchLoadStopTimes(tripIds) {
+  const toLoad = tripIds.filter(id => !state.gtfsData.stopTimesIndex[id]);
+  if (toLoad.length === 0) return;
+  
+  // Load in batches to avoid overwhelming the IPC
+  const BATCH_SIZE = 20;
+  for (let i = 0; i < toLoad.length; i += BATCH_SIZE) {
+    const batch = toLoad.slice(i, Math.min(i + BATCH_SIZE, toLoad.length));
+    
+    // Load batch in parallel
+    await Promise.all(batch.map(async (tripId) => {
+      try {
+        const stopTimes = await window.electronAPI.queryStopTimes(tripId);
+        state.gtfsData.stopTimesIndex[tripId] = stopTimes;
+        
+        // Populate stopsIndex
+        stopTimes.forEach(st => {
+          if (st.stop_id && !state.gtfsData.stopsIndex[st.stop_id]) {
+            state.gtfsData.stopsIndex[st.stop_id] = {
+              stop_id: st.stop_id,
+              stop_name: st.stop_name,
+              stop_lat: st.stop_lat,
+              stop_lon: st.stop_lon
+            };
+          }
+        });
+      } catch (err) {
+        console.error('[App] Error loading stop times for trip', tripId, err);
+        state.gtfsData.stopTimesIndex[tripId] = [];
+      }
+    }));
   }
 }
 
