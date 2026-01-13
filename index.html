@@ -4938,14 +4938,28 @@ console.log('[ROUTE_TABLE] logicalRoutes:', logicalRoutes);
 }
 
 async function selectRoute(routeId, directionId) {
-  if (!state.selectedDate) return;
+  console.log('🔵 [APP] selectRoute called:', { routeId, directionId, selectedDate:  state.selectedDate });
+  
+  if (!state.selectedDate) {
+    console.error('❌ No selected date! ');
+    return;
+  }
+  
   state.loading = true;
   render();
+  
   try {
-    const trips = await window.electronAPI.queryTrips({ routeId, date: state.selectedDate, directionId: directionId || '0' });
-    state.currentTrips = trips;
-    state.selectedRoute = (state.gtfsData.routes || []).find(r => r.route_id === routeId);
-    state.selectedDirection = directionId || '0';
+    const params = { 
+      routeId:  routeId, 
+      date: state.selectedDate, 
+      directionId: directionId || '0' 
+    };
+    
+    console. log('📤 Calling queryTrips with:', JSON.stringify(params));
+    
+    const trips = await window.electronAPI.queryTrips(params);
+    
+    console.log('📥 Received trips:', trips.length);
     
     // Initialize indexes if needed
     if (!state.gtfsData.stopTimesIndex) state.gtfsData.stopTimesIndex = {};
