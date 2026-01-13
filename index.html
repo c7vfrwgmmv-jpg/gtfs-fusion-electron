@@ -2086,7 +2086,7 @@ async function handleFileUpload(e) {
 }
 
 async function loadRoutesForUI() {
-  console.log('[App] loadRoutesForUI START');
+  console.log('[App] loadRoutesForUI START - VERSION 2.0');  // ✅ To potwierdzi że kod jest nowy
   
   const timeoutPromise = new Promise((_, reject) => 
     setTimeout(() => {
@@ -2135,6 +2135,7 @@ async function loadRoutesForUI() {
     throw new Error('Failed to load routes:  ' + err.message);
   }
 }
+	  
 async function loadAvailableDates() {
   console.log('[App] loadAvailableDates START');
   
