@@ -341,15 +341,48 @@ ipcMain.handle('query-routes', async () => {
   try {
     console.log('[SQL] query-routes START');
     
-    // Get columns with timeout
-    const columns = await new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => reject(new Error('Query timeout getting columns')), 10000);
-      conn.all(`SELECT column_name FROM information_schema.columns WHERE table_name = 'routes'`, 
-        (err, rows) => {
-          clearTimeout(timeout);
-          err ? reject(err) : resolve(rows);
-        });
+    const rows = await new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        console.error('[SQL] query-routes TIMEOUT after 10s');
+        reject(new Error('Query timeout'));
+      }, 10000);
+      
+      conn.all(`
+        SELECT 
+          r.route_id,
+          r.route_short_name,
+          r.route_long_name,
+          r. route_type,
+          r. agency_id,
+          COALESCE(a.agency_name, 'Unknown') as agency_name,
+          COUNT(DISTINCT t.trip_id) as trip_count
+        FROM routes r
+        LEFT JOIN agency a ON r.agency_id = a.agency_id
+        LEFT JOIN trips t ON r.route_id = t.route_id
+        GROUP BY r.route_id, r.route_short_name, r.route_long_name, r.route_type, r.agency_id, a.agency_name
+        ORDER BY r.route_short_name
+      `, (err, rows) => {
+        clearTimeout(timeout);
+        if (err) {
+          console.error('[SQL] query-routes ERROR:', err);
+          reject(err);
+        } else {
+          console.log('[SQL] query-routes SUCCESS:', rows.length, 'rows');
+          resolve(rows);
+        }
+      });
     });
+    
+    return convertBigIntsToNumbers(rows || []);
+    
+  } catch (err) {
+    console.error('[SQL] query-routes FAILED:', err);
+    throw err;
+  } finally {
+    conn. close();
+    console.log('[SQL] query-routes connection closed');
+  }
+});
     
     const columnSet = new Set(columns.map(c => c.column_name.toLowerCase()));
     
@@ -579,25 +612,33 @@ ipcMain.handle('query-shape', async (event, shapeId) => {
     conn.close();
   }
 });
-
 ipcMain.handle('query-available-dates', async () => {
   if (!db) throw new Error('Database not loaded');
   
   const conn = db.connect();
   
   try {
-    console.log('[SQL] query-available-dates START');
+    console. log('[SQL] query-available-dates START');
     
     const rows = await new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => reject(new Error('Query timeout')), 10000);
+      const timeout = setTimeout(() => {
+        console.error('[SQL] query-available-dates TIMEOUT');
+        reject(new Error('Query timeout'));
+      }, 10000);
+      
       conn.all(`SELECT DISTINCT start_date, end_date FROM calendar ORDER BY start_date`, 
         (err, rows) => {
           clearTimeout(timeout);
-          err ? reject(err) : resolve(rows);
+          if (err) {
+            console.error('[SQL] query-available-dates ERROR:', err);
+            reject(err);
+          } else {
+            console.log('[SQL] query-available-dates SUCCESS:', rows.length, 'rows');
+            resolve(rows);
+          }
         });
     });
     
-    console.log('[SQL] query-available-dates SUCCESS:', rows.length, 'ranges');
     return convertBigIntsToNumbers(rows || []);
     
   } catch (err) {
@@ -605,6 +646,7 @@ ipcMain.handle('query-available-dates', async () => {
     throw err;
   } finally {
     conn.close();
+    console.log('[SQL] query-available-dates connection closed');
   }
 });
 
@@ -628,4 +670,5 @@ app.on('activate', () => {
 
 app.on('quit', async () => {
   if (db) await new Promise((resolve) => db.close(resolve));
+
 });
