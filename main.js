@@ -594,6 +594,12 @@ async function loadGTFSFile(filePath) {
 }
 
 // ════════════════════════════════════════════════════════════════
+// GLOBAL DATA STORE (for IPC queries)
+// ════════════════════════════════════════════════════════════════
+
+let cachedGtfsData = null;
+
+// ════════════════════════════════════════════════════════════════
 // IPC HANDLERS
 // ════════════════════════════════════════════════════════════════
 
@@ -619,6 +625,8 @@ ipcMain.handle('open-file-dialog', async () => {
 ipcMain.handle('load-gtfs-file', async (event, filePath) => {
   try {
     const data = await loadGTFSFile(filePath);
+    // Cache the data for IPC queries
+    cachedGtfsData = data;
     return { success: true, data };
   } catch (error) {
     console.error('[Main] GTFS load failed:', error);
@@ -638,6 +646,67 @@ ipcMain.handle('load-gtfs-file', async (event, filePath) => {
       stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
     };
   }
+});
+
+// Query stop_times for multiple trips in a single batch
+ipcMain.handle('query-stop-times-batch', async (event, tripIds) => {
+  console.log(`[SQL] query-stop-times-batch START for ${tripIds.length} trips`);
+  const startTime = Date.now();
+  
+  if (!cachedGtfsData || !cachedGtfsData.stopTimesIndex) {
+    console.warn('[SQL] No GTFS data loaded');
+    return {};
+  }
+  
+  const result = {};
+  const stopsIndex = cachedGtfsData.stopsIndex || {};
+  
+  // Fetch all stop_times for requested trips
+  tripIds.forEach(tripId => {
+    const stopTimes = cachedGtfsData.stopTimesIndex[tripId];
+    if (stopTimes && stopTimes.length > 0) {
+      // Enrich with stop information
+      result[tripId] = stopTimes.map(st => ({
+        trip_id: tripId,
+        arrival_time: st.arrival_time,
+        departure_time: st.departure_time,
+        stop_id: st.stop_id,
+        stop_sequence: st.stop_sequence,
+        stop_name: stopsIndex[st.stop_id]?.stop_name || '',
+        stop_lat: stopsIndex[st.stop_id]?.stop_lat || '',
+        stop_lon: stopsIndex[st.stop_id]?.stop_lon || '',
+        pickup_type: st.pickup_type,
+        drop_off_type: st.drop_off_type
+      }));
+    }
+  });
+  
+  const duration = Date.now() - startTime;
+  const totalStopTimes = Object.values(result).reduce((sum, arr) => sum + arr.length, 0);
+  console.log(`[SQL] query-stop-times-batch SUCCESS: ${totalStopTimes} stop_times in ${duration}ms`);
+  
+  return result;
+});
+
+// Query all stops from the GTFS data
+ipcMain.handle('query-all-stops', async (event) => {
+  console.log('[SQL] query-all-stops START');
+  const startTime = Date.now();
+  
+  if (!cachedGtfsData || !cachedGtfsData.stops) {
+    console.warn('[SQL] No GTFS data loaded');
+    return [];
+  }
+  
+  // Return all stops, sorted by name
+  const allStops = [...cachedGtfsData.stops].sort((a, b) => 
+    (a.stop_name || '').localeCompare(b.stop_name || '')
+  );
+  
+  const duration = Date.now() - startTime;
+  console.log(`[SQL] query-all-stops SUCCESS: ${allStops.length} stops in ${duration}ms`);
+  
+  return allStops;
 });
 
 // ════════════════════════════════════════════════════════════════

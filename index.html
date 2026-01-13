@@ -903,6 +903,45 @@ async function preloadStopTimesForTrips(tripIds, onProgress) {
   console.log('[Cache] Preloaded ' + toLoad.length + ' trips');
 }
 
+// Batch load stop_times using IPC (much faster than IndexedDB)
+async function batchLoadStopTimesViaIPC(tripIds, onProgress) {
+  if (!window.electronAPI || !window.electronAPI.queryStopTimesBatch) {
+    console.warn('[Batch] IPC not available, falling back to individual queries');
+    return await preloadStopTimesForTrips(tripIds, onProgress);
+  }
+  
+  console.log(`[Batch] Loading stop_times for ${tripIds.length} trips via IPC...`);
+  const startTime = performance.now();
+  
+  // Process in chunks to show progress and avoid overwhelming IPC
+  const CHUNK_SIZE = 100;
+  const chunks = [];
+  for (let i = 0; i < tripIds.length; i += CHUNK_SIZE) {
+    chunks.push(tripIds.slice(i, i + CHUNK_SIZE));
+  }
+  
+  let loadedCount = 0;
+  
+  for (const chunk of chunks) {
+    const batchResult = await window.electronAPI.queryStopTimesBatch(chunk);
+    
+    // Store in cache
+    Object.keys(batchResult).forEach(tripId => {
+      stopTimesCache[tripId] = batchResult[tripId];
+    });
+    
+    loadedCount += chunk.length;
+    
+    if (onProgress) {
+      const percent = Math.floor((loadedCount / tripIds.length) * 100);
+      onProgress(loadedCount, tripIds.length, percent);
+    }
+  }
+  
+  const duration = performance.now() - startTime;
+  console.log(`[Batch] Loaded ${tripIds.length} trips in ${duration.toFixed(0)}ms (${(duration/tripIds.length).toFixed(1)}ms per trip)`);
+}
+
 // Cleanup IndexedDB on page unload
 window.addEventListener('beforeunload', () => {
   if (currentDbName) {
@@ -4670,18 +4709,33 @@ function selectRoute(route) {
   // Invalidate canonical cache when route changes
   invalidateCanonicalCacheForCurrentSelection();
 
-  // Preload stop_times for this route if using IndexedDB
-  if (state.gtfsData.stopTimesDB) {
-    const tripIds = routeTrips.map(t => t.trip_id);
+  // Preload stop_times for this route
+  const tripIds = routeTrips.map(t => t.trip_id);
+  
+  // If we have IPC batch query available, use it for better performance
+  if (window.electronAPI && window.electronAPI.queryStopTimesBatch) {
+    batchLoadStopTimesViaIPC(tripIds, (loaded, total, percent) => {
+      state.loadingStep = `Ładowanie danych trasy... ${loaded}/${total}`;
+      state.loadingProgressPercent = percent;
+    }).then(() => {
+      state.loadingStep = '';
+      state.loadingProgressPercent = 0;
+      resetMap();
+      render();
+    });
+  } else if (state.gtfsData.stopTimesDB) {
+    // Fall back to IndexedDB for backward compatibility
     preloadStopTimesForTrips(tripIds, (loaded, total, percent) => {
       state.loadingStep = `Ładowanie danych trasy... ${loaded}/${total}`;
       state.loadingProgressPercent = percent;
     }).then(() => {
       state.loadingStep = '';
+      state.loadingProgressPercent = 0;
       resetMap();
       render();
     });
   } else {
+    // RAM mode - no preloading needed
     resetMap();
     render();
   }

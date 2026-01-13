@@ -10,6 +10,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Load GTFS file (returns { success, data } or { success: false, error })
   loadGTFSFile: (filePath) => ipcRenderer.invoke('load-gtfs-file', filePath),
   
+  // Query stop_times for multiple trips in batch
+  queryStopTimesBatch: (tripIds) => ipcRenderer.invoke('query-stop-times-batch', tripIds),
+  
+  // Query all stops
+  queryAllStops: () => ipcRenderer.invoke('query-all-stops'),
+  
   // Listen to load progress updates
   onLoadProgress: (callback) => {
     const subscription = (event, data) => callback(data);
