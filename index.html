@@ -2103,15 +2103,32 @@ async function loadRoutesForUI() {
     
     console.log('[App] loadRoutesForUI SUCCESS - got', routes.length, 'routes');
     
+    // ✅ Group routes by route_short_name (logical line number)
+    // to create logical route groups
     const grouped = {};
+    
     routes.forEach(r => {
-      const key = r.agency_name || 'Unknown';
-      if (!grouped[key]) grouped[key] = [];
-      r.colorStyle = r.route_color ?  `background:  #${r.route_color}` : '';
-      grouped[key]. push(r);
+      // Use route_short_name as the grouping key (e.g., "1", "2", "A", "B")
+      const key = r.route_short_name || r.route_id || 'Unknown';
+      
+      if (!grouped[key]) {
+        grouped[key] = {
+          route_short_name: key,
+          route_id: key,  // fallback for identification
+          members: []     // ✅ Array of routes in this logical group
+        };
+      }
+      
+      r.colorStyle = r.route_color ?  `background: #${r.route_color}` : '';
+      grouped[key].members.push(r);
     });
-    state.gtfsData. logicalRoutes = grouped;
+    
+    // ✅ Convert object to array of groups
+    state.gtfsData. logicalRoutes = Object.values(grouped);
     state.gtfsData.routes = routes;
+    
+    console.log('[App] loadRoutesForUI - created', state.gtfsData.logicalRoutes.length, 'logical route groups');
+    console.log('[App] loadRoutesForUI - sample group:', state.gtfsData.logicalRoutes[0]);
     
   } catch (err) {
     console.error('[App] loadRoutesForUI FAILED:', err);
