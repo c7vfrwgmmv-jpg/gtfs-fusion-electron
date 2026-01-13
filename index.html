@@ -3491,22 +3491,8 @@ function invalidateCanonicalCacheForCurrentSelection() {
 function getAllTripsForRoute() {
   if (!state.selectedRoute || !state.gtfsData || !state.selectedDate) return [];
 
-  let routeIds = [state.selectedRoute.route_id];
-  if (state.selectedRouteGroup && Array.isArray(state.selectedRouteGroup.members)) {
-    routeIds = state.selectedRouteGroup.members
-      .map(r => r.route_id)
-      .filter(Boolean);
-  }
-
-  let routeTrips = [];
-  routeIds.forEach(rid => {
-    const arr = state.gtfsData.tripsIndex[rid] || [];
-    routeTrips = routeTrips.concat(arr);
-  });
-
-  routeTrips = routeTrips.filter(t => (t.direction_id || '0') === state.selectedDirection);
-  const activeServices = getServicesForDate(state.selectedDate);
-  return routeTrips.filter(t => activeServices.includes(t.service_id));
+  // With DuckDB approach, trips are loaded via selectRoute into state.currentTrips
+  return state.currentTrips || [];
 }
 
     function computeVariantsForRoute() {
@@ -4451,7 +4437,7 @@ btn.innerHTML = `
 
       btn.onclick = () => {
         state.selectedRouteGroup = group;
-        selectRoute(repr);
+        selectRoute(repr.route_id, '0');
       };
 
       grid.appendChild(btn);
@@ -4511,7 +4497,7 @@ btn.innerHTML = `
 
         btn.onclick = () => {
           state.selectedRouteGroup = group;
-          selectRoute(repr);
+          selectRoute(repr.route_id, '0');
         };
 
         grid.appendChild(btn);
@@ -4573,7 +4559,7 @@ btn.innerHTML = `
 
         btn.onclick = () => {
           state.selectedRouteGroup = group;
-          selectRoute(repr);
+          selectRoute(repr.route_id, '0');
         };
 
         grid.appendChild(btn);
@@ -4601,7 +4587,7 @@ btn.innerHTML = `
 
       btn.onclick = () => {
         state.selectedRouteGroup = null; // w tym trybie świadomie patrzymy na pojedynczy route_id
-        selectRoute(route);
+        selectRoute(route.route_id, '0');
       };
 
       grid.appendChild(btn);
@@ -4616,29 +4602,69 @@ btn.innerHTML = `
   renderRouteTable();
 }
 
-async function selectRoute(route) {
-  const container = document.querySelector('#routes-list-container');
-  if (container) {
-    state.routesListScrollPosition = container.scrollTop || 0;
-  }
-  
-  state.selectedRoute = route;
-
-  // Jeśli bieżąca grupa logiczna NIE zawiera tej trasy, czyścimy grupę
-  if (!state.selectedRouteGroup ||
-      !(state.selectedRouteGroup.members || []).some(r => r.route_id === route.route_id)) {
-    state.selectedRouteGroup = null;
-  }
-
-  // Set default direction to 0 for now
-  state.selectedDirection = '0';
-
-  // Invalidate canonical cache when route changes
-  invalidateCanonicalCacheForCurrentSelection();
-
-  // Reset map and render
-  resetMap();
+async function selectRoute(routeId, directionId) {
+  if (!state.selectedDate) return;
+  state.loading = true;
   render();
+  try {
+    const trips = await window.electronAPI.queryTrips({ routeId, date: state.selectedDate, directionId: directionId || '0' });
+    state.currentTrips = trips;
+    state.selectedRoute = state.gtfsData.routes.find(r => r.route_id === routeId);
+    state.selectedDirection = directionId || '0';
+    
+    // Load stop times for all trips to populate cache
+    state.loadingStep = 'Loading stop times...';
+    render();
+    
+    if (!state.gtfsData.stopTimesIndex) state.gtfsData.stopTimesIndex = {};
+    for (const trip of trips) {
+      if (!state.gtfsData.stopTimesIndex[trip.trip_id]) {
+        const stopTimes = await window.electronAPI.queryStopTimes(trip.trip_id);
+        state.gtfsData.stopTimesIndex[trip.trip_id] = stopTimes;
+        
+        // Also populate stopsIndex from stop times
+        if (!state.gtfsData.stopsIndex) state.gtfsData.stopsIndex = {};
+        stopTimes.forEach(st => {
+          if (st.stop_id && !state.gtfsData.stopsIndex[st.stop_id]) {
+            state.gtfsData.stopsIndex[st.stop_id] = {
+              stop_id: st.stop_id,
+              stop_name: st.stop_name,
+              stop_lat: st.stop_lat,
+              stop_lon: st.stop_lon
+            };
+          }
+        });
+      }
+    }
+    
+    state.loading = false;
+    state.loadingStep = '';
+    render();
+  } catch (err) {
+    state.error = err.message;
+    state.loading = false;
+    render();
+  }
+}
+
+async function selectTrip(tripId) {
+  state.loading = true;
+  render();
+  try {
+    const stopTimes = await window.electronAPI.queryStopTimes(tripId);
+    state.selectedTrip = state.currentTrips.find(t => t.trip_id === tripId);
+    state.currentStopTimes = stopTimes;
+    if (state.selectedTrip?.shape_id) {
+      state.currentShape = await window.electronAPI.queryShape(state.selectedTrip.shape_id);
+    }
+    state.loading = false;
+    render();
+    updateMap();
+  } catch (err) {
+    state.error = err.message;
+    state.loading = false;
+    render();
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════
