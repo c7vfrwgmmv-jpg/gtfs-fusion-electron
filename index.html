@@ -195,6 +195,12 @@ let state = {
   selectedStop: null,
   stopViewFilteredRoutes: [],
   
+  // DuckDB state
+  currentTrips: [],
+  currentStopTimes: [],
+  selectedTrip: null,
+  currentShape: null,
+  
   // Stops list view state
   expandedStopGroup: null,
   stopsListMapState: null,
@@ -877,6 +883,35 @@ function getStopTimesIndexOrCache() {
   return {};
 }
 
+// Async helper to ensure stop times are loaded for a trip
+async function ensureStopTimesLoaded(tripId) {
+  if (!state.gtfsData.stopTimesIndex) state.gtfsData.stopTimesIndex = {};
+  if (!state.gtfsData.stopsIndex) state.gtfsData.stopsIndex = {};
+  
+  if (!state.gtfsData.stopTimesIndex[tripId]) {
+    try {
+      const stopTimes = await window.electronAPI.queryStopTimes(tripId);
+      state.gtfsData.stopTimesIndex[tripId] = stopTimes;
+      
+      // Also populate stopsIndex from stop times
+      stopTimes.forEach(st => {
+        if (st.stop_id && !state.gtfsData.stopsIndex[st.stop_id]) {
+          state.gtfsData.stopsIndex[st.stop_id] = {
+            stop_id: st.stop_id,
+            stop_name: st.stop_name,
+            stop_lat: st.stop_lat,
+            stop_lon: st.stop_lon
+          };
+        }
+      });
+    } catch (err) {
+      console.error('[App] Error loading stop times for trip', tripId, err);
+      state.gtfsData.stopTimesIndex[tripId] = [];
+    }
+  }
+  return state.gtfsData.stopTimesIndex[tripId] || [];
+}
+
 // Preload stop_times for a list of trips into cache
 async function preloadStopTimesForTrips(tripIds, onProgress) {
   if (!state.gtfsData.stopTimesDB) return; // RAM mode doesn't need preloading
@@ -902,119 +937,6 @@ async function preloadStopTimesForTrips(tripIds, onProgress) {
   
   console.log('[Cache] Preloaded ' + toLoad.length + ' trips');
 }
-
-// Batch load stop_times using IPC (much faster than IndexedDB)
-async function batchLoadStopTimesViaIPC(tripIds, onProgress) {
-  if (!window.electronAPI || !window.electronAPI.queryStopTimesBatch) {
-    console.warn('[Batch] IPC not available, falling back to individual queries');
-    return await preloadStopTimesForTrips(tripIds, onProgress);
-  }
-  
-  console.log(`[Batch] Loading stop_times for ${tripIds.length} trips via IPC...`);
-  const startTime = performance.now();
-  
-  // Process in chunks to show progress and avoid overwhelming IPC
-  const CHUNK_SIZE = 100;
-  const chunks = [];
-  for (let i = 0; i < tripIds.length; i += CHUNK_SIZE) {
-    chunks.push(tripIds.slice(i, i + CHUNK_SIZE));
-  }
-  
-  let loadedCount = 0;
-  
-  for (const chunk of chunks) {
-    const batchResult = await window.electronAPI.queryStopTimesBatch(chunk);
-    
-    // Store in cache
-    Object.keys(batchResult).forEach(tripId => {
-      stopTimesCache[tripId] = batchResult[tripId];
-    });
-    
-    loadedCount += chunk.length;
-    
-    if (onProgress) {
-      const percent = Math.floor((loadedCount / tripIds.length) * 100);
-      onProgress(loadedCount, tripIds.length, percent);
-    }
-  }
-  
-  const duration = performance.now() - startTime;
-  console.log(`[Batch] Loaded ${tripIds.length} trips in ${duration.toFixed(0)}ms (${(duration/tripIds.length).toFixed(1)}ms per trip)`);
-}
-
-// Load stop times for all trips that serve a specific stop
-async function loadStopTimesForStop(stopId, onProgress) {
-  if (!stopId || !state.gtfsData) return;
-  
-  console.log(`[LoadStopTimes] Loading stop times for stop: ${stopId}`);
-  
-  // Find all routes that serve this stop
-  let routesToLoad = [];
-  if (state.gtfsData.stopToRoutes && state.gtfsData.stopToRoutes[stopId]) {
-    // Use pre-built mapping
-    routesToLoad = state.gtfsData.stopToRoutes[stopId];
-  } else {
-    // Fallback: search through all routes (slow)
-    console.warn('[LoadStopTimes] stopToRoutes not available, using slow search');
-    return;
-  }
-  
-  // Collect all trip IDs for these routes
-  const tripIds = [];
-  routesToLoad.forEach(routeInfo => {
-    const trips = state.gtfsData.tripsIndex[routeInfo.route_id] || [];
-    trips.forEach(trip => {
-      // Only load if not already in cache
-      if (!stopTimesCache[trip.trip_id]) {
-        tripIds.push(trip.trip_id);
-      }
-    });
-  });
-  
-  if (tripIds.length === 0) {
-    console.log('[LoadStopTimes] All stop times already cached');
-    return;
-  }
-  
-  console.log(`[LoadStopTimes] Loading ${tripIds.length} trips for ${routesToLoad.length} routes`);
-  
-  // Use batch loading via IPC
-  if (window.electronAPI && window.electronAPI.queryStopTimesBatch) {
-    await batchLoadStopTimesViaIPC(tripIds, onProgress);
-  } else if (state.gtfsData.stopTimesDB) {
-    await preloadStopTimesForTrips(tripIds, onProgress);
-  }
-  // If using RAM mode, stop times are already available
-}
-
-// Global function to handle stop selection (called from map popups)
-window.selectStopAndRender = async function(stopId) {
-  const stop = state.gtfsData.stopsIndex[stopId];
-  if (!stop) return;
-  
-  state.selectedStop = stop;
-  state.stopViewFilteredRoutes = [];
-  state.stopsListMapState = null;
-  
-  // Load stop times for this stop before rendering
-  state.loading = true;
-  state.loadingStep = 'Loading stop times...';
-  render();
-  
-  try {
-    await loadStopTimesForStop(stopId, (loaded, total, percent) => {
-      state.loadingStep = `Loading stop times... ${loaded}/${total}`;
-      state.loadingProgressPercent = percent;
-    });
-  } catch (err) {
-    console.error('[Stop] Failed to load stop times:', err);
-  }
-  
-  state.loading = false;
-  state.loadingStep = '';
-  state.loadingProgressPercent = 0;
-  render();
-};
 
 // Cleanup IndexedDB on page unload
 window.addEventListener('beforeunload', () => {
@@ -2038,64 +1960,58 @@ async function handleFileUpload(e) {
       throttledRender();
     });
     
-// Load file in main process
-console.log('[App] Starting GTFS load...');
-
-// ✅ DODAJ TIMEOUT (30s)
-const timeoutPromise = new Promise((_, reject) => 
-  setTimeout(() => reject(new Error('Load timeout - no response from main process')), 30000)
-);
-
-let result;
-try {
-  result = await Promise.race([
-    window.electronAPI.loadGTFSFile(filePath),
-    timeoutPromise
-  ]);
-} catch (err) {
-  cleanupProgress();
-  throw new Error('Failed to load GTFS: ' + err.message);
-}
-
-console.log('[App] Raw result from main:', result); // ✅ DEBUG
-
-// Cleanup progress listener
-cleanupProgress();
-
-if (!result) {
-  throw new Error('No response from main process');
-}
-
-if (!result.success) {
-  throw new Error(result.error || 'Unknown error loading GTFS');
-}
-
-console.log('[App] GTFS data received from main process');
+    // Load file in main process
+    console.log('[App] Starting GTFS load...');
+    
+    const result = await window.electronAPI.loadGTFSFile(filePath);
+    
+    console.log('[App] Raw result from main:', result);
     
     // Cleanup progress listener
     cleanupProgress();
+    
+    if (!result) {
+      throw new Error('No response from main process');
+    }
     
     if (!result.success) {
       throw new Error(result.error || 'Unknown error loading GTFS');
     }
     
-    console.log('[App] GTFS data received from main process');
+    console.log('[App] GTFS data loaded from', result.fromCache ? 'cache' : 'scratch');
     
-    // Convert calendarDatesByDateIndex back to Map
-    const calendarDatesByDateIndex = new Map(result.data.calendarDatesByDateIndex || []);
-    
-    // Apply data to state
-    state.gtfsData = {
-      ...result.data,
-      calendarDatesByDateIndex
+    // Initialize state with database reference and all required indexes
+    state.gtfsData = { 
+      loaded: true, 
+      stats: result.stats, 
+      fromCache: result.fromCache,
+      // Initialize all indexes that the app expects
+      tripsIndex: {},         // Will be populated per-route by selectRoute
+      stopTimesIndex: {},     // Will be populated on-demand
+      stopsIndex: {},         // Will be populated from stop_times queries
+      shapesIndex: {},        // Optional, populated if shapes exist
+      agenciesIndex: {},      // Will be populated from routes query
+      calendar: [],           // Could be loaded if needed
+      calendarDatesByDateIndex: new Map() // Calendar exceptions
     };
     
-    // Build logical routes (UI logic, stays in renderer)
-    console.log('[App] Building logical routes...');
-    state.gtfsData.logicalRoutes = buildLogicalRoutes(
-      state.gtfsData.routes,
-      state.gtfsData.agenciesIndex
-    );
+    // Load routes and dates from database
+    await loadRoutesForUI();
+    await loadAvailableDates();
+    
+    // Build agenciesIndex from loaded routes
+    if (state.gtfsData.routes) {
+      state.gtfsData.routes.forEach(route => {
+        if (route.agency_id && route.agency_name) {
+          if (!state.gtfsData.agenciesIndex[route.agency_id]) {
+            state.gtfsData.agenciesIndex[route.agency_id] = {
+              agency_id: route.agency_id,
+              agency_name: route.agency_name
+            };
+          }
+        }
+      });
+    }
     
     // Clear caches
     stationNameToIdCache = null;
@@ -2106,50 +2022,11 @@ console.log('[App] GTFS data received from main process');
     state.routeProfiles = {};
     state.canonicalMasterLists = {};
     
-    // Generate available dates
-    console.log('[App] Generating available dates...');
-    const dates = generateAvailableDates(
-      state.gtfsData.calendar,
-      state.gtfsData.calendarDates
-    );
-    state.availableDates = dates;
-    
-    // Select default date (today or nearest)
-    if (dates.length > 0) {
-      const today = new Date();
-      const todayStr = today.getFullYear() + 
-        String(today.getMonth() + 1).padStart(2, '0') + 
-        String(today.getDate()).padStart(2, '0');
-      
-      let selectedDate = null;
-      
-      if (dates.some(d => d.value === todayStr)) {
-        selectedDate = todayStr;
-      } else {
-        const earlierDates = dates.filter(d => d.value <= todayStr);
-        if (earlierDates.length > 0) {
-          selectedDate = earlierDates[earlierDates.length - 1].value;
-        } else {
-          selectedDate = dates[0].value;
-        }
-      }
-      
-      state.selectedDate = selectedDate;
-    }
-    
-    // Auto-select route if only one
-    if (state.gtfsData.routes.length === 1) {
-      state.selectedRoute = state.gtfsData.routes[0];
-      const routeTrips = state.gtfsData.tripsIndex[state.selectedRoute.route_id] || [];
-      if (routeTrips.length > 0) {
-        state.selectedDirection = [...new Set(routeTrips.map(t => t.direction_id || '0'))][0];
-      }
-    }
-    
+    // NOW show complete after all loading is done
     state.loading = false;
-    state.loadingStep = '';
+    state.loadingStep = 'Complete!';
+    state.loadingProgressPercent = 100;
     state.loadingProgress = 0;
-    state.loadingProgressPercent = 0;
     
     console.log('[App] GTFS loaded successfully!');
     render();
@@ -2162,6 +2039,95 @@ console.log('[App] GTFS data received from main process');
     state.loadingProgressPercent = 0;
     render();
   }
+}
+
+async function loadRoutesForUI() {
+  console.log('[App] loadRoutesForUI START');
+  
+  const timeoutPromise = new Promise((_, reject) => 
+    setTimeout(() => {
+      console.error('[App] loadRoutesForUI TIMEOUT after 15s');
+      reject(new Error('Timeout loading routes from database'));
+    }, 15000)
+  );
+  
+  try {
+    const routes = await Promise.race([
+      window.electronAPI.queryRoutes(),
+      timeoutPromise
+    ]);
+    
+    console.log('[App] loadRoutesForUI SUCCESS - got', routes.length, 'routes');
+    
+    const grouped = {};
+    routes.forEach(r => {
+      const key = r.agency_name || 'Unknown';
+      if (!grouped[key]) grouped[key] = [];
+      r.colorStyle = r.route_color ?  `background:  #${r.route_color}` : '';
+      grouped[key]. push(r);
+    });
+    state.gtfsData. logicalRoutes = grouped;
+    state.gtfsData.routes = routes;
+    
+  } catch (err) {
+    console.error('[App] loadRoutesForUI FAILED:', err);
+    throw new Error('Failed to load routes:  ' + err.message);
+  }
+}
+async function loadAvailableDates() {
+  console.log('[App] loadAvailableDates START');
+  
+  const timeoutPromise = new Promise((_, reject) => 
+    setTimeout(() => {
+      console.error('[App] loadAvailableDates TIMEOUT after 15s');
+      reject(new Error('Timeout loading dates from database'));
+    }, 15000)
+  );
+  
+  try {
+    const ranges = await Promise.race([
+      window.electronAPI.queryAvailableDates(),
+      timeoutPromise
+    ]);
+    
+    console.log('[App] loadAvailableDates SUCCESS - got', ranges.length, 'ranges');
+    
+    const dates = new Set();
+    ranges.forEach(r => {
+      let cur = String(r.start_date || '');
+      const endDate = String(r.end_date || '');
+      
+      if (!cur || cur.length !== 8 || !endDate || endDate. length !== 8) return;
+      
+      while (cur <= endDate) {
+        dates.add(cur);
+        const d = new Date(
+          parseInt(cur.substring(0, 4)),
+          parseInt(cur.substring(4, 6)) - 1,
+          parseInt(cur.substring(6, 8))
+        );
+        d.setDate(d.getDate() + 1);
+        cur = d.toISOString().substring(0, 10).replace(/-/g, '');
+      }
+    });
+    
+    const availableDatesArray = Array.from(dates).sort();
+    state.availableDates = availableDatesArray. map(d => ({ value: d, label: formatDateLabel(d) }));
+    const today = new Date().toISOString().substring(0, 10).replace(/-/g, '');
+    state.selectedDate = dates.has(today) ? today : availableDatesArray[0];
+    
+  } catch (err) {
+    console.error('[App] loadAvailableDates FAILED:', err);
+    throw new Error('Failed to load dates: ' + err.message);
+  }
+}
+
+function formatDateLabel(dateStr) {
+  if (!dateStr || dateStr.length !== 8) return dateStr;
+  const year = dateStr.substring(0, 4);
+  const month = dateStr.substring(4, 6);
+  const day = dateStr.substring(6, 8);
+  return `${day}.${month}.${year}`;
 }
 
     function cancelParsing() {
@@ -2851,7 +2817,7 @@ function buildRouteProfileForCurrentSelection() {
   const stopTimesIndex = getStopTimesIndexOrCache();
   if (!stopTimesIndex || !tripsIndex || !stopsIndex) return null;
 
-  // 3. Zbierz trips tej logical linii + kierunku (bez filtra daty)
+  // 3. Get trips for current route (will use tripsIndex populated by selectRoute)
   let routeIds = memberRoutes.map(r => r.route_id).filter(Boolean);
   if (!routeIds.length) return null;
 
@@ -3636,22 +3602,8 @@ function invalidateCanonicalCacheForCurrentSelection() {
 function getAllTripsForRoute() {
   if (!state.selectedRoute || !state.gtfsData || !state.selectedDate) return [];
 
-  let routeIds = [state.selectedRoute.route_id];
-  if (state.selectedRouteGroup && Array.isArray(state.selectedRouteGroup.members)) {
-    routeIds = state.selectedRouteGroup.members
-      .map(r => r.route_id)
-      .filter(Boolean);
-  }
-
-  let routeTrips = [];
-  routeIds.forEach(rid => {
-    const arr = state.gtfsData.tripsIndex[rid] || [];
-    routeTrips = routeTrips.concat(arr);
-  });
-
-  routeTrips = routeTrips.filter(t => (t.direction_id || '0') === state.selectedDirection);
-  const activeServices = getServicesForDate(state.selectedDate);
-  return routeTrips.filter(t => activeServices.includes(t.service_id));
+  // With DuckDB approach, trips are loaded via selectRoute into state.currentTrips
+  return state.currentTrips || [];
 }
 
     function computeVariantsForRoute() {
@@ -4061,40 +4013,6 @@ function getAvailableDirections() {
   });
 
   return result;
-}
-
-// Simple fallback to get basic direction info without needing stop times
-function getBasicDirections() {
-  if (!state.selectedRoute || !state.gtfsData) return [];
-  
-  let routeIds = [state.selectedRoute.route_id];
-  if (state.selectedRouteGroup && Array.isArray(state.selectedRouteGroup.members)) {
-    routeIds = state.selectedRouteGroup.members
-      .map(r => r.route_id)
-      .filter(Boolean);
-  }
-  
-  let routeTripsAll = [];
-  routeIds.forEach(rid => {
-    const arr = state.gtfsData.tripsIndex[rid] || [];
-    routeTripsAll = routeTripsAll.concat(arr);
-  });
-  
-  // Group by direction_id
-  const dirMap = new Map();
-  for (const t of routeTripsAll) {
-    const dirId = String(t.direction_id === undefined || t.direction_id === null ? '0' : t.direction_id);
-    if (!dirMap.has(dirId)) {
-      dirMap.set(dirId, {
-        id: dirId,
-        name: `Direction ${dirId}`,
-        trips: []
-      });
-    }
-    dirMap.get(dirId).trips.push(t);
-  }
-  
-  return Array.from(dirMap.values());
 }
 
 function applyDirectionHeuristic(perDir, absDiff = 1, relRatio = 0.30) {
@@ -4630,7 +4548,7 @@ btn.innerHTML = `
 
       btn.onclick = () => {
         state.selectedRouteGroup = group;
-        selectRoute(repr);
+        selectRoute(repr.route_id, '0');
       };
 
       grid.appendChild(btn);
@@ -4690,7 +4608,7 @@ btn.innerHTML = `
 
         btn.onclick = () => {
           state.selectedRouteGroup = group;
-          selectRoute(repr);
+          selectRoute(repr.route_id, '0');
         };
 
         grid.appendChild(btn);
@@ -4752,7 +4670,7 @@ btn.innerHTML = `
 
         btn.onclick = () => {
           state.selectedRouteGroup = group;
-          selectRoute(repr);
+          selectRoute(repr.route_id, '0');
         };
 
         grid.appendChild(btn);
@@ -4780,7 +4698,7 @@ btn.innerHTML = `
 
       btn.onclick = () => {
         state.selectedRouteGroup = null; // w tym trybie świadomie patrzymy na pojedynczy route_id
-        selectRoute(route);
+        selectRoute(route.route_id, '0');
       };
 
       grid.appendChild(btn);
@@ -4795,56 +4713,93 @@ btn.innerHTML = `
   renderRouteTable();
 }
 
-function selectRoute(route) {
-  const container = document.querySelector('#routes-list-container');
-  if (container) {
-    state.routesListScrollPosition = container.scrollTop || 0;
-  }
-  
-  state.selectedRoute = route;
-
-  // Jeśli bieżąca grupa logiczna NIE zawiera tej trasy, czyścimy grupę
-  if (!state.selectedRouteGroup ||
-      !(state.selectedRouteGroup.members || []).some(r => r.route_id === route.route_id)) {
-    state.selectedRouteGroup = null;
-  }
-
-  const routeTrips = state.gtfsData.tripsIndex[route.route_id] || [];
-  if (routeTrips.length > 0) {
-    state.selectedDirection = [...new Set(routeTrips.map(t => t.direction_id || '0'))][0];
-  }
-
-  // Invalidate canonical cache when route changes
-  invalidateCanonicalCacheForCurrentSelection();
-
-  // Preload stop_times for this route
-  const tripIds = routeTrips.map(t => t.trip_id);
-  
-  // If we have IPC batch query available, use it for better performance
-  if (window.electronAPI && window.electronAPI.queryStopTimesBatch) {
-    batchLoadStopTimesViaIPC(tripIds, (loaded, total, percent) => {
-      state.loadingStep = `Ładowanie danych trasy... ${loaded}/${total}`;
-      state.loadingProgressPercent = percent;
-    }).then(() => {
-      state.loadingStep = '';
-      state.loadingProgressPercent = 0;
-      resetMap();
+async function selectRoute(routeId, directionId) {
+  if (!state.selectedDate) return;
+  state.loading = true;
+  render();
+  try {
+    const trips = await window.electronAPI.queryTrips({ routeId, date: state.selectedDate, directionId: directionId || '0' });
+    state.currentTrips = trips;
+    state.selectedRoute = (state.gtfsData.routes || []).find(r => r.route_id === routeId);
+    state.selectedDirection = directionId || '0';
+    
+    // Initialize indexes if needed
+    if (!state.gtfsData.stopTimesIndex) state.gtfsData.stopTimesIndex = {};
+    if (!state.gtfsData.stopsIndex) state.gtfsData.stopsIndex = {};
+    if (!state.gtfsData.tripsIndex) state.gtfsData.tripsIndex = {};
+    
+    // Populate tripsIndex for compatibility with existing code
+    state.gtfsData.tripsIndex[routeId] = trips;
+    
+    // Batch load stop times for all trips (more efficient than one-by-one)
+    if (trips.length > 0) {
+      state.loadingStep = `Loading stop times for ${trips.length} trips...`;
       render();
-    });
-  } else if (state.gtfsData.stopTimesDB) {
-    // Fall back to IndexedDB for backward compatibility
-    preloadStopTimesForTrips(tripIds, (loaded, total, percent) => {
-      state.loadingStep = `Ładowanie danych trasy... ${loaded}/${total}`;
-      state.loadingProgressPercent = percent;
-    }).then(() => {
-      state.loadingStep = '';
-      state.loadingProgressPercent = 0;
-      resetMap();
-      render();
-    });
-  } else {
-    // RAM mode - no preloading needed
-    resetMap();
+      
+      await batchLoadStopTimes(trips.map(t => t.trip_id));
+    }
+    
+    state.loading = false;
+    state.loadingStep = '';
+    render();
+  } catch (err) {
+    state.error = err.message;
+    state.loading = false;
+    render();
+  }
+}
+
+// Batch load stop times for multiple trips efficiently
+async function batchLoadStopTimes(tripIds) {
+  const toLoad = tripIds.filter(id => !state.gtfsData.stopTimesIndex[id]);
+  if (toLoad.length === 0) return;
+  
+  // Load in batches to avoid overwhelming the IPC
+  const BATCH_SIZE = 20;
+  for (let i = 0; i < toLoad.length; i += BATCH_SIZE) {
+    const batch = toLoad.slice(i, Math.min(i + BATCH_SIZE, toLoad.length));
+    
+    // Load batch in parallel
+    await Promise.all(batch.map(async (tripId) => {
+      try {
+        const stopTimes = await window.electronAPI.queryStopTimes(tripId);
+        state.gtfsData.stopTimesIndex[tripId] = stopTimes;
+        
+        // Populate stopsIndex
+        stopTimes.forEach(st => {
+          if (st.stop_id && !state.gtfsData.stopsIndex[st.stop_id]) {
+            state.gtfsData.stopsIndex[st.stop_id] = {
+              stop_id: st.stop_id,
+              stop_name: st.stop_name,
+              stop_lat: st.stop_lat,
+              stop_lon: st.stop_lon
+            };
+          }
+        });
+      } catch (err) {
+        console.error('[App] Error loading stop times for trip', tripId, err);
+        state.gtfsData.stopTimesIndex[tripId] = [];
+      }
+    }));
+  }
+}
+
+async function selectTrip(tripId) {
+  state.loading = true;
+  render();
+  try {
+    const stopTimes = await window.electronAPI.queryStopTimes(tripId);
+    state.selectedTrip = state.currentTrips.find(t => t.trip_id === tripId);
+    state.currentStopTimes = stopTimes;
+    if (state.selectedTrip?.shape_id) {
+      state.currentShape = await window.electronAPI.queryShape(state.selectedTrip.shape_id);
+    }
+    state.loading = false;
+    render();
+    updateMap();
+  } catch (err) {
+    state.error = err.message;
+    state.loading = false;
     render();
   }
 }
@@ -5117,32 +5072,20 @@ async function renderStopsView() {
   const stopsMap = $('stops-map');
   if (!stopsList || !stopsMap) return;
   
-  // Use pre-built stop-to-routes mapping if available (fast path)
-  let stopToRoutes;
-  if (state.gtfsData.stopToRoutes) {
-    console.log('[RenderStops] Using pre-built stop-to-routes mapping');
-    // Convert object to Map for consistency with old code
-    stopToRoutes = new Map();
-    Object.keys(state.gtfsData.stopToRoutes).forEach(stopId => {
-      stopToRoutes.set(stopId, state.gtfsData.stopToRoutes[stopId]);
-    });
-  } else {
-    // Fallback: build mapping on demand (slow path for backward compatibility)
-    console.log('[RenderStops] Building stop-to-routes mapping (this may take a while)...');
-    const isInitialLoad = !cachedStopToRoutesMap;
-    if (isInitialLoad) {
-      stopsList.innerHTML = '<div class="p-4 text-center text-gray-600">Przygotowywanie danych przystanków...</div>';
-    }
-    
-    stopToRoutes = await getStopToRoutesMap(
-      state.gtfsData.routes,
-      state.gtfsData.tripsIndex,
-      getStopTimesIndexOrCache(),
-      isInitialLoad ? (processed, total, percent) => {
-        stopsList.innerHTML = `<div class="p-4 text-center text-gray-600">Przygotowywanie danych przystanków... ${percent}%</div>`;
-      } : null
-    );
+  // Show loading indicator for initial data preparation
+  const isInitialLoad = !cachedStopToRoutesMap;
+  if (isInitialLoad) {
+    stopsList.innerHTML = '<div class="p-4 text-center text-gray-600">Przygotowywanie danych przystanków...</div>';
   }
+  
+  const stopToRoutes = await getStopToRoutesMap(
+    state.gtfsData.routes,
+    state.gtfsData.tripsIndex,
+    getStopTimesIndexOrCache(),
+    isInitialLoad ? (processed, total, percent) => {
+      stopsList.innerHTML = `<div class="p-4 text-center text-gray-600">Przygotowywanie danych przystanków... ${percent}%</div>`;
+    } : null
+  );
   
   const stopsData = [];
   Object.values(state.gtfsData.stopsIndex).forEach(stop => {
@@ -5369,7 +5312,10 @@ async function renderStopsView() {
         // State 1: Lista pokazuje grupy - popup z klikalnym linkiem
         marker.bindPopup(`
           <a href="#" onclick="event.preventDefault(); 
-            selectStopAndRender('${stop.stop_id}'); 
+            state.selectedStop = state.gtfsData.stopsIndex['${stop.stop_id}']; 
+            state.stopViewFilteredRoutes = []; 
+			state.stopsListMapState = null;
+            render(); 
             return false;" 
             style="text-decoration: none; color:inherit;">
             <strong>${Utils.escapeHtml(stop.stop_name)}</strong><br>
@@ -5382,27 +5328,9 @@ async function renderStopsView() {
         });
       } else {
         // State 2: Lista pokazuje przystanki - bezpośrednie przejście do STOP_DETAIL
-        marker.on('click', async () => {
+        marker.on('click', () => {
           state.selectedStop = stop;
           state.stopViewFilteredRoutes = [];
-          
-          // Load stop times before rendering
-          state.loading = true;
-          state.loadingStep = 'Loading stop times...';
-          render();
-          
-          try {
-            await loadStopTimesForStop(stop.stop_id, (loaded, total, percent) => {
-              state.loadingStep = `Loading stop times... ${loaded}/${total}`;
-              state.loadingProgressPercent = percent;
-            });
-          } catch (err) {
-            console.error('[Stop] Failed to load stop times:', err);
-          }
-          
-          state.loading = false;
-          state.loadingStep = '';
-          state.loadingProgressPercent = 0;
           render();
         });
       }
@@ -5469,27 +5397,7 @@ async function renderStopsView() {
           
           state.selectedStop = stop;
           state.stopViewFilteredRoutes = [];
-          
-          // Load stop times for this stop before rendering
-          state.loading = true;
-          state.loadingStep = 'Loading stop times...';
           render();
-          
-          loadStopTimesForStop(stopId, (loaded, total, percent) => {
-            state.loadingStep = `Loading stop times... ${loaded}/${total}`;
-            state.loadingProgressPercent = percent;
-          }).then(() => {
-            state.loading = false;
-            state.loadingStep = '';
-            state.loadingProgressPercent = 0;
-            render();
-          }).catch(err => {
-            console.error('[Stop] Failed to load stop times:', err);
-            state.loading = false;
-            state.loadingStep = '';
-            state.loadingProgressPercent = 0;
-            render();
-          });
         }
         return;
       }
@@ -5560,27 +5468,7 @@ if (stop) {
 
   state.selectedStop = stop;
   state.stopViewFilteredRoutes = [];
-  
-  // Load stop times for this stop before rendering
-  state.loading = true;
-  state.loadingStep = 'Loading stop times...';
   render();
-  
-  loadStopTimesForStop(stopId, (loaded, total, percent) => {
-    state.loadingStep = `Loading stop times... ${loaded}/${total}`;
-    state.loadingProgressPercent = percent;
-  }).then(() => {
-    state.loading = false;
-    state.loadingStep = '';
-    state.loadingProgressPercent = 0;
-    render();
-  }).catch(err => {
-    console.error('[Stop] Failed to load stop times:', err);
-    state.loading = false;
-    state.loadingStep = '';
-    state.loadingProgressPercent = 0;
-    render();
-  });
 }
     };
     
@@ -7213,17 +7101,7 @@ case VIEW.LOADING:
 
   case VIEW.ROUTE_TIMETABLE:
     // ========== WIDOK LINII z rozkładem ==========
-    let directions = getAvailableDirections();
-    
-    // Fallback: if getAvailableDirections fails to detect multiple directions 
-    // (e.g., because stop times aren't loaded yet), use basic direction detection
-    if (directions.length <= 1) {
-      const basicDirs = getBasicDirections();
-      if (basicDirs.length > 1) {
-        directions = basicDirs;
-      }
-    }
-    
+    const directions = getAvailableDirections();
     const dirA = Array.isArray(directions) && directions.length >= 1 ? directions[0] : null;
     const dirB = Array.isArray(directions) && directions.length >= 2 ? directions[1] : null;
     const displayA = dirA ? (dirA.fullName || dirA.name || '') : '';
