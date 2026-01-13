@@ -1996,25 +1996,33 @@ async function loadAvailableDates() {
   const ranges = await window.electronAPI.queryAvailableDates();
   const dates = new Set();
   ranges.forEach(r => {
-    let cur = r.start_date;
-    while (cur <= r.end_date) {
+    let cur = String(r.start_date || '');
+    const endDate = String(r.end_date || '');
+    
+    if (!cur || cur.length !== 8 || !endDate || endDate.length !== 8) return;
+    
+    while (cur <= endDate) {
       dates.add(cur);
-      const d = new Date(parseInt(cur.substr(0,4)), parseInt(cur.substr(4,2))-1, parseInt(cur.substr(6,2)));
+      const d = new Date(
+        parseInt(cur.substring(0, 4)),
+        parseInt(cur.substring(4, 6)) - 1,
+        parseInt(cur.substring(6, 8))
+      );
       d.setDate(d.getDate() + 1);
-      cur = d.toISOString().substr(0,10).replace(/-/g,'');
+      cur = d.toISOString().substring(0, 10).replace(/-/g, '');
     }
   });
   const availableDatesArray = Array.from(dates).sort();
   state.availableDates = availableDatesArray.map(d => ({ value: d, label: formatDateLabel(d) }));
-  const today = new Date().toISOString().substr(0,10).replace(/-/g,'');
+  const today = new Date().toISOString().substring(0, 10).replace(/-/g, '');
   state.selectedDate = dates.has(today) ? today : availableDatesArray[0];
 }
 
 function formatDateLabel(dateStr) {
   if (!dateStr || dateStr.length !== 8) return dateStr;
-  const year = dateStr.substr(0, 4);
-  const month = dateStr.substr(4, 2);
-  const day = dateStr.substr(6, 2);
+  const year = dateStr.substring(0, 4);
+  const month = dateStr.substring(4, 6);
+  const day = dateStr.substring(6, 8);
   return `${day}.${month}.${year}`;
 }
 
