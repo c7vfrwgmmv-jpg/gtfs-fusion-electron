@@ -979,7 +979,7 @@ ipcMain.handle('query-directions-for-route', async (event, routeIds) => {
     
     const rows = await new Promise((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error('Query timeout')), 30000);
-      conn.all(query, routeIdArray, (err, rows) => {
+      conn.all(query, ...routeIdArray, (err, rows) => {
         clearTimeout(timeout);
         if (err) {
           console.error('[SQL] query-directions-for-route ERROR:', err);

@@ -5359,29 +5359,38 @@ function renderVirtualStopsList(groupsToRender) {
   }
 }
 
-// Cached stop-to-routes mapping to avoid rebuilding
-let cachedStopToRoutesMap = null;
-let cachedStopToRoutesHash = null;
+// Cached stops with routes data
+let cachedStopsWithRoutes = null;
 
 // Get stops with routes from SQL
 async function getStopsWithRoutes() {
   try {
     const stopsWithRoutes = await window.electronAPI.queryStopsWithRoutes();
+    // Cache the successful result
+    cachedStopsWithRoutes = stopsWithRoutes;
     return stopsWithRoutes;
   } catch (err) {
     console.error('[getStopsWithRoutes] SQL query failed:', err);
-    // Fallback: return stops without route information
-    return Object.values(state.gtfsData.stopsIndex).map(stop => ({
+    
+    // First, try to use cached data if available
+    if (cachedStopsWithRoutes) {
+      console.warn('[getStopsWithRoutes] Using cached data from previous successful query');
+      return cachedStopsWithRoutes;
+    }
+    
+    // Last resort fallback: return stops without route information
+    console.warn('[getStopsWithRoutes] No cache available, returning stops without routes');
+    const fallback = Object.values(state.gtfsData.stopsIndex || {}).map(stop => ({
       ...stop,
       routes: [],
       routeCount: 0
     }));
+    return fallback;
   }
 }
 
 function clearStopToRoutesCache() {
-  cachedStopToRoutesMap = null;
-  cachedStopToRoutesHash = null;
+  cachedStopsWithRoutes = null;
 }
 
 async function renderStopsView() {
