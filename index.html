@@ -1016,6 +1016,67 @@ window.selectStopAndRender = async function(stopId) {
   render();
 };
 
+// Helper function to navigate back to stops list from stop detail view
+function backToStopsList() {
+  console.log('[App] Back to stops list');
+  state.selectedStop = null;
+  state.stopDetailDepartures = null;
+  state.showStopsView = true;
+  state.stopViewFilteredRoutes = [];
+  
+  // Cleanup map if exists
+  if (state.stopDetailMapInstance) {
+    try {
+      state.stopDetailMapInstance.remove();
+    } catch(e) {
+      console.warn('[App] Error removing stop detail map:', e);
+    }
+    state.stopDetailMapInstance = null;
+  }
+  state.stopDetailMapInitialized = false;
+  state.stopDetailMapLayers = {};
+  
+  render();
+}
+
+// Load departures for a stop using IPC handler
+async function loadStopDepartures(stopId) {
+  console.log('[App] Loading departures for stop:', stopId);
+  
+  if (!state.selectedDate) {
+    console.warn('[App] No date selected');
+    return;
+  }
+  
+  try {
+    const departures = await window.electronAPI.queryStopDepartures({
+      stopId,
+      date: state.selectedDate
+    });
+    
+    // Transform to match expected format
+    state.stopDetailDepartures = departures.map(dep => ({
+      route: {
+        route_id: dep.route_id,
+        route_short_name: dep.route_short_name,
+        route_long_name: dep.route_long_name
+      },
+      trip: {
+        trip_headsign: dep.trip_headsign
+      },
+      time: dep.departure_time,
+      timeMinutes: Utils.timeToMinutes(dep.departure_time),
+      headsign: dep.trip_headsign || ''
+    }));
+    
+    console.log('[App] Loaded', state.stopDetailDepartures.length, 'departures');
+    
+  } catch (err) {
+    console.error('[App] Failed to load departures:', err);
+    state.stopDetailDepartures = [];
+  }
+}
+
 // Cleanup IndexedDB on page unload
 window.addEventListener('beforeunload', () => {
   if (currentDbName) {
@@ -7447,6 +7508,11 @@ if (state.gtfsData && !state.selectedRoute && state.showStopsView && state.selec
     await renderStopDetailMap(state.selectedStop.stop_id, state.selectedDate, state.stopViewFilteredRoutes);
     // FIX #3: Apply initial filter after map is initialized
     filterStopDetailMapLayers(state.stopViewFilteredRoutes);
+    
+    // Load departures using IPC handler
+    await loadStopDepartures(state.selectedStop.stop_id);
+    // Re-render to show loaded departures
+    updateDeparturesTable();
   }, 50);
   
 // replace the stop-detail date-select handler with this (if present in your file)
