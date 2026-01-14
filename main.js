@@ -1152,7 +1152,6 @@ ipcMain.handle('query-stops-with-routes', async () => {
         s.stop_name,
         s.stop_lat,
         s.stop_lon,
-        s.parent_station,
         r.route_id,
         r.route_short_name,
         r.route_long_name,
@@ -1161,7 +1160,7 @@ ipcMain.handle('query-stops-with-routes', async () => {
       LEFT JOIN stop_times st ON s.stop_id = st.stop_id
       LEFT JOIN trips t ON st.trip_id = t.trip_id
       LEFT JOIN routes r ON t.route_id = r.route_id
-      GROUP BY s.stop_id, s.stop_name, s.stop_lat, s.stop_lon, s.parent_station, 
+      GROUP BY s.stop_id, s.stop_name, s.stop_lat, s.stop_lon, 
                r.route_id, r.route_short_name, r.route_long_name, r.route_type
       ORDER BY s.stop_name
     `;
@@ -1190,7 +1189,6 @@ ipcMain.handle('query-stops-with-routes', async () => {
           stop_name: row.stop_name,
           stop_lat: row.stop_lat,
           stop_lon: row.stop_lon,
-          parent_station: row.parent_station,
           routes: []
         });
       }
