@@ -204,14 +204,44 @@ async function buildDatabaseFromZip(zipPath, dbPath, metaPath, hash, sendProgres
       console.log(`[DB] ✓ Loaded ${name}`);
     }
     
+    sendProgress('Creating full-text search indexes...', 93);
+    
+    // Create FTS5 virtual table for stops
+    await execAsync(`
+      CREATE VIRTUAL TABLE IF NOT EXISTS stops_fts USING fts5(
+        stop_id UNINDEXED,
+        stop_name,
+        stop_desc,
+        parent_station UNINDEXED,
+        content=stops,
+        tokenize='porter unicode61'
+      );
+    `);
+    
+    // Populate FTS index from stops table
+    await execAsync(`
+      INSERT INTO stops_fts(stop_id, stop_name, stop_desc, parent_station)
+      SELECT 
+        stop_id, 
+        stop_name, 
+        COALESCE(stop_desc, ''),
+        COALESCE(parent_station, '')
+      FROM stops;
+    `);
+    
+    console.log('[DB] ✓ Created FTS index for stops');
+    
     sendProgress('Building indexes...', 92);
     await execAsync(`
       CREATE INDEX IF NOT EXISTS idx_trips_route ON trips(route_id);
       CREATE INDEX IF NOT EXISTS idx_trips_service ON trips(service_id);
       CREATE INDEX IF NOT EXISTS idx_stop_times_trip ON stop_times(trip_id);
       CREATE INDEX IF NOT EXISTS idx_stop_times_trip_seq ON stop_times(trip_id, stop_sequence);
+      CREATE INDEX IF NOT EXISTS idx_stop_times_stop ON stop_times(stop_id);
       CREATE INDEX IF NOT EXISTS idx_calendar_service ON calendar(service_id);
       CREATE INDEX IF NOT EXISTS idx_calendar_dates_date ON calendar_dates(date);
+      CREATE INDEX IF NOT EXISTS idx_stops_name ON stops(stop_name);
+      CREATE INDEX IF NOT EXISTS idx_stops_parent ON stops(parent_station);
     `);
     
     await execAsync('VACUUM');
@@ -1242,6 +1272,166 @@ ipcMain.handle('query-stops-with-routes', async () => {
   } catch (err) {
     console.error('[SQL] query-stops-with-routes FAILED:', err);
     throw err;
+  } finally {
+    conn.close();
+  }
+});
+
+// Query stops with pagination and search (NEW - for infinite scroll)
+ipcMain.handle('query-stops-paginated', async (event, { searchQuery, offset, limit }) => {
+  if (!db) throw new Error('Database not loaded');
+  
+  const conn = db.connect();
+  
+  try {
+    console.log('[SQL] query-stops-paginated', { searchQuery, offset, limit });
+    
+    let query, params;
+    const safeLimit = Math.min(Math.max(1, limit || 50), 200); // Cap at 200 for safety
+    const safeOffset = Math.max(0, offset || 0);
+    
+    if (searchQuery && searchQuery.trim()) {
+      // SEARCH MODE: Use FTS5 with ranking
+      const searchTerm = searchQuery.trim();
+      
+      query = `
+        WITH matching_stops AS (
+          SELECT 
+            stop_id,
+            rank
+          FROM stops_fts 
+          WHERE stops_fts MATCH ?
+          ORDER BY rank
+          LIMIT ? OFFSET ?
+        ),
+        stop_routes AS (
+          SELECT 
+            s.stop_id,
+            s.stop_name,
+            s.stop_lat,
+            s.stop_lon,
+            s.parent_station,
+            JSON_GROUP_ARRAY(
+              DISTINCT JSON_OBJECT(
+                'route_id', r.route_id,
+                'route_short_name', r.route_short_name,
+                'route_long_name', r.route_long_name,
+                'route_type', r.route_type
+              )
+            ) FILTER (WHERE r.route_id IS NOT NULL) as routes_json,
+            COUNT(DISTINCT r.route_id) as route_count
+          FROM stops s
+          JOIN matching_stops ms ON s.stop_id = ms.stop_id
+          LEFT JOIN stop_times st ON s.stop_id = st.stop_id
+          LEFT JOIN trips t ON st.trip_id = t.trip_id
+          LEFT JOIN routes r ON t.route_id = r.route_id
+          GROUP BY s.stop_id, s.stop_name, s.stop_lat, s.stop_lon, s.parent_station
+          ORDER BY ms.rank
+        )
+        SELECT * FROM stop_routes
+      `;
+      params = [searchTerm, safeLimit, safeOffset];
+      
+    } else {
+      // BROWSE MODE: Alphabetical pagination
+      query = `
+        WITH stop_routes AS (
+          SELECT 
+            s.stop_id,
+            s.stop_name,
+            s.stop_lat,
+            s.stop_lon,
+            s.parent_station,
+            JSON_GROUP_ARRAY(
+              DISTINCT JSON_OBJECT(
+                'route_id', r.route_id,
+                'route_short_name', r.route_short_name,
+                'route_long_name', r.route_long_name,
+                'route_type', r.route_type
+              )
+            ) FILTER (WHERE r.route_id IS NOT NULL) as routes_json,
+            COUNT(DISTINCT r.route_id) as route_count
+          FROM stops s
+          LEFT JOIN stop_times st ON s.stop_id = st.stop_id
+          LEFT JOIN trips t ON st.trip_id = t.trip_id
+          LEFT JOIN routes r ON t.route_id = r.route_id
+          GROUP BY s.stop_id, s.stop_name, s.stop_lat, s.stop_lon, s.parent_station
+          ORDER BY s.stop_name
+          LIMIT ? OFFSET ?
+        )
+        SELECT * FROM stop_routes
+      `;
+      params = [safeLimit, safeOffset];
+    }
+    
+    const rows = await new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('Query timeout')), 30000);
+      conn.all(query, ...params, (err, rows) => {
+        clearTimeout(timeout);
+        if (err) {
+          console.error('[SQL] query-stops-paginated ERROR:', err);
+          reject(err);
+        } else {
+          resolve(rows);
+        }
+      });
+    });
+    
+    // Parse JSON in main process (faster than renderer)
+    const result = rows.map(row => ({
+      stop_id: row.stop_id,
+      stop_name: row.stop_name,
+      stop_lat: row.stop_lat,
+      stop_lon: row.stop_lon,
+      parent_station: row.parent_station,
+      routes: row.routes_json ? JSON.parse(row.routes_json) : [],
+      routeCount: Number(row.route_count || 0)
+    }));
+    
+    console.log('[SQL] query-stops-paginated SUCCESS:', result.length, 'stops');
+    return convertBigIntsToNumbers(result);
+    
+  } catch (err) {
+    console.error('[SQL] query-stops-paginated FAILED:', err);
+    throw err;
+  } finally {
+    conn.close();
+  }
+});
+
+// Query total count of stops (with optional search filter)
+ipcMain.handle('query-stops-count', async (event, { searchQuery }) => {
+  if (!db) throw new Error('Database not loaded');
+  
+  const conn = db.connect();
+  
+  try {
+    let query, params;
+    
+    if (searchQuery && searchQuery.trim()) {
+      // Count FTS matches
+      query = `
+        SELECT COUNT(*) as count 
+        FROM stops_fts 
+        WHERE stops_fts MATCH ?
+      `;
+      params = [searchQuery.trim()];
+    } else {
+      // Count all stops
+      query = `SELECT COUNT(*) as count FROM stops`;
+      params = [];
+    }
+    
+    const result = await new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('Query timeout')), 10000);
+      conn.get(query, ...params, (err, row) => {
+        clearTimeout(timeout);
+        err ? reject(err) : resolve(row);
+      });
+    });
+    
+    return Number(result.count || 0);
+    
   } finally {
     conn.close();
   }

@@ -46,6 +46,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Query all stops with their routes (no date filter)
   queryStopsWithRoutes: () => ipcRenderer.invoke('query-stops-with-routes'),
   
+  // Query stops with pagination and search (NEW - for infinite scroll)
+  queryStopsPaginated: (params) => ipcRenderer.invoke('query-stops-paginated', params),
+  queryStopsCount: (params) => ipcRenderer.invoke('query-stops-count', params),
+  
   // Prepare stop detail data (combines routes and departures for a stop)
   prepareStopDetailData: (params) => ipcRenderer.invoke('prepare-stop-detail-data', params),
   
