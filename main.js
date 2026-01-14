@@ -537,7 +537,7 @@ ipcMain.handle('query-trips', async (event, { routeId, date, directionId }) => {
     // ✅ JEDNO wywołanie conn.all z spread operatorem
     const rows = await new Promise((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error('Query timeout')), 30000);
-      conn.all(query, ...params, (err, rows) => {  // ✅ ... params (spread operator)
+      conn.all(query, params, (err, rows) => {
         clearTimeout(timeout);
         if (err) {
           console.error('❌ [SQL] Query error:', err);
@@ -766,9 +766,9 @@ ipcMain.handle('query-route-data-bulk', async (event, { routeId, date, direction
               'departure_time', st.departure_time,
               'pickup_type', COALESCE(st.pickup_type, '0'),
               'drop_off_type', COALESCE(st.drop_off_type, '0'),
-              'stop_name', s.stop_name,
-              'stop_lat', s.stop_lat,
-              'stop_lon', s.stop_lon
+              'stop_name', st.stop_name,
+              'stop_lat', st.stop_lat,
+              'stop_lon', st.stop_lon
             )
           )
           FROM (
@@ -794,7 +794,7 @@ ipcMain.handle('query-route-data-bulk', async (event, { routeId, date, direction
     
     const rows = await new Promise((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error('Query timeout')), 60000); // 60s for large routes
-      conn.all(query, ...params, (err, rows) => {
+      conn.all(query, params, (err, rows) => {
         clearTimeout(timeout);
         if (err) {
           console.error('[SQL] Bulk query error:', err);
@@ -987,7 +987,7 @@ ipcMain.handle('query-departures-for-stop', async (event, { stopId, date }) => {
     
     const rows = await new Promise((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error('Query timeout')), 30000);
-      conn.all(query, ...params, (err, rows) => {
+      conn.all(query, params, (err, rows) => {
         clearTimeout(timeout);
         if (err) {
           console.error('[SQL] query-departures-for-stop ERROR:', err);
@@ -1087,7 +1087,7 @@ ipcMain.handle('query-directions-for-route', async (event, routeIds) => {
     
     const rows = await new Promise((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error('Query timeout')), 30000);
-      conn.all(query, ...routeIdArray, (err, rows) => {
+      conn.all(query, routeIdArray, (err, rows) => {
         clearTimeout(timeout);
         if (err) {
           console.error('[SQL] query-directions-for-route ERROR:', err);
@@ -1223,7 +1223,7 @@ ipcMain.handle('query-routes-at-stop', async (event, { stopId, date }) => {
     
     const rows = await new Promise((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error('Query timeout')), 30000);
-      conn.all(query, ...params, (err, rows) => {
+      conn.all(query, params, (err, rows) => {
         clearTimeout(timeout);
         if (err) {
           console.error('[SQL] query-routes-at-stop ERROR:', err);
@@ -1483,7 +1483,7 @@ ipcMain.handle('query-stops-paginated', async (event, { searchQuery, offset, lim
     
     const rows = await new Promise((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error('Query timeout')), 30000);
-      conn.all(query, ...params, (err, rows) => {
+      conn.all(query, params, (err, rows) => {
         clearTimeout(timeout);
         if (err) {
           console.error('[SQL] query-stops-paginated ERROR:', err);
@@ -1550,7 +1550,7 @@ ipcMain.handle('query-stops-count', async (event, { searchQuery }) => {
     
     const result = await new Promise((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error('Query timeout')), 10000);
-      conn.all(query, ...params, (err, rows) => {
+      conn.all(query, params, (err, rows) => {
         clearTimeout(timeout);
         if (err) {
           reject(err);
@@ -1692,7 +1692,7 @@ ipcMain.handle('prepare-stop-detail-data', async (event, { stopId, date }) => {
     
     const rows = await new Promise((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error('Query timeout')), 30000);
-      conn.all(query, ...params, (err, rows) => {
+      conn.all(query, params, (err, rows) => {
         clearTimeout(timeout);
         if (err) {
           console.error('[SQL] prepare-stop-detail-data ERROR:', err);
