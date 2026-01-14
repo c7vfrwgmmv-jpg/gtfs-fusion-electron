@@ -3943,6 +3943,198 @@ function filterStopDetailMapLayers(filteredRouteIds = []) {
     }
 
 // ═══════════════════════════════════════════════════════════════
+// 10.5. STOP TIMETABLE MODAL (BACKEND-AGGREGATED)
+// ═══════════════════════════════════════════════════════════════
+
+/**
+ * Open stop timetable modal from route timetable view
+ * Called when clicking on stop name in timetable table
+ * @param {string} stopId - Stop ID
+ */
+async function openStopTimetable(stopId) {
+  if (!stopId || !state.gtfsData || !state.gtfsData.stopsIndex) {
+    console.error('[openStopTimetable] Invalid stopId or missing data');
+    return;
+  }
+  
+  const stop = state.gtfsData.stopsIndex[stopId];
+  if (!stop) {
+    console.error('[openStopTimetable] Stop not found:', stopId);
+    return;
+  }
+  
+  // Pass current route ID for filtering
+  const routeId = state.selectedRoute ? state.selectedRoute.route_id : null;
+  
+  await showStopTimetableModal(stop, routeId);
+}
+
+/**
+ * Show stop timetable modal using fully aggregated backend data
+ * Backend handles all logic: weekday grouping, terminus detection, annotations
+ * Frontend only renders the provided data structure
+ */
+async function showStopTimetableModal(stop, routeId = null) {
+  if (!stop || !state.selectedDate) {
+    console.error('[Timetable Modal] Missing stop or date');
+    return;
+  }
+  
+  try {
+    // Call backend API for fully aggregated timetable
+    const timetableData = await window.electronAPI.queryTimetableForStop({
+      stopId: stop.stop_id,
+      date: state.selectedDate,
+      routeId: routeId
+    });
+    
+    if (!timetableData || !timetableData.columns) {
+      console.error('[Timetable Modal] Invalid response from backend');
+      return;
+    }
+    
+    const { columns, legends, metadata } = timetableData;
+    
+    // Helper: Format times by hour
+    const formatTimesByHour = (timesByHour) => {
+      if (!timesByHour || Object.keys(timesByHour).length === 0) {
+        return '<span style="color: #999;">No service</span>';
+      }
+      
+      const rows = [];
+      const hourOrder = [];
+      for (let h = 4; h < 24; h++) hourOrder.push(h);
+      for (let h = 0; h < 4; h++) hourOrder.push(h);
+      const hours = hourOrder.filter(h => timesByHour.hasOwnProperty(h));
+      
+      hours.forEach((hour, index) => {
+        const hourPadded = String(hour).padStart(2,'0');
+        const minutes = timesByHour[hour].join('  ');
+        const bgColor = index % 2 === 0 ? '#e4e7eb' : '#ffffff';
+        rows.push(`<div style="margin-bottom: 0; background: ${bgColor}; padding: 0.1rem 0.25rem; line-height: 1.3;"><div style="background: #4a5568; color: white; padding: 0.1rem 0.3rem; display: inline-block; font-weight: bold; min-width: 1.75rem; text-align: center; font-size: 0.8rem;">${hourPadded}</div><div style="padding: 0.1rem 0.3rem; display: inline; font-size: 0.8rem;">${minutes}</div></div>`);
+      });
+      
+      return rows.join('');
+    };
+    
+    // Build legends HTML
+    let legendHTML = '';
+    if (legends && legends.length > 0) {
+      const legendParts = [];
+      
+      legends.forEach(legend => {
+        if (legend.type === 'weekday' && legend.items && legend.items.length > 0) {
+          const weekdayItems = legend.items.map(item => 
+            `<span style="font-weight: bold;">${Utils.escapeHtml(item.symbol)}</span> - ${Utils.escapeHtml(item.description)}`
+          );
+          legendParts.push(weekdayItems.join(' • '));
+        } else if (legend.type === 'terminus' && legend.items && legend.items.length > 0) {
+          const terminusItems = legend.items.map(item =>
+            `<span style="font-weight: bold;">${Utils.escapeHtml(item.symbol)}</span> - ${Utils.escapeHtml(item.description)}`
+          );
+          legendParts.push(terminusItems.join(' • '));
+        }
+      });
+      
+      if (legendParts.length > 0) {
+        legendHTML = `<div style="padding: 0.2rem 1rem; border-top: 1px solid #ddd; background: #f9fafb; font-size: 0.7rem; line-height: 1.2; margin: 0;">${legendParts.join(' | ')}</div>`;
+      }
+    }
+    
+    // Build table header
+    let tableHeaderHTML = `<tr style="background: #e5e7eb;">
+      <th style="padding: 0.1rem 0.3rem; border: 1px solid #ddd; text-align: center; font-size: 0.8rem; font-weight: 700;">${Utils.escapeHtml(columns.weekday.name)}</th>
+      <th style="padding: 0.1rem 0.3rem; border: 1px solid #ddd; text-align: center; font-size: 0.8rem; font-weight: 700;">${Utils.escapeHtml(columns.saturday.name)}</th>
+      <th style="padding: 0.1rem 0.3rem; border: 1px solid #ddd; text-align: center; font-size: 0.8rem; font-weight: 700;">${Utils.escapeHtml(columns.sunday.name)}</th>`;
+    
+    // Add weekday holiday columns
+    if (columns.weekdayHolidays && columns.weekdayHolidays.length > 0) {
+      columns.weekdayHolidays.forEach(hCol => {
+        tableHeaderHTML += `<th style="padding: 0.1rem 0.3rem; border: 1px solid #ddd; text-align: center; font-size: 0.8rem; font-weight: 700;">${Utils.escapeHtml(hCol.name)}</th>`;
+      });
+    }
+    
+    tableHeaderHTML += `</tr>`;
+    
+    // Build table body
+    let tableBodyHTML = `<tr>
+      <td style="padding: 0.25rem; border: 1px solid #ddd; vertical-align: top;">${formatTimesByHour(columns.weekday.times)}</td>
+      <td style="padding: 0.25rem; border: 1px solid #ddd; vertical-align: top;">${formatTimesByHour(columns.saturday.times)}</td>
+      <td style="padding: 0.25rem; border: 1px solid #ddd; vertical-align: top;">${formatTimesByHour(columns.sunday.times)}</td>`;
+    
+    // Add weekday holiday column data
+    if (columns.weekdayHolidays && columns.weekdayHolidays.length > 0) {
+      columns.weekdayHolidays.forEach(hCol => {
+        tableBodyHTML += `<td style="padding: 0.25rem; border: 1px solid #ddd; vertical-align: top;">${formatTimesByHour(hCol.times)}</td>`;
+      });
+    }
+    
+    tableBodyHTML += `</tr>`;
+    
+    // Build modal header
+    let headerHTML = '<div style="display: flex; gap: 1rem; align-items: flex-start; padding: 0.75rem 1rem; border-bottom: 2px solid #ddd;">';
+    
+    if (state.selectedRoute) {
+      headerHTML += `<div style="border: 3px solid #000; height: 53px; font-weight: bold; font-size: 1.9rem; text-align: center; line-height: 1.2; min-width: 93px; display: flex; align-items: center; justify-content: center;">${Utils.escapeHtml(state.selectedRoute.route_short_name || state.selectedRoute.route_id)}</div>`;
+    }
+    
+    headerHTML += `<div style="flex: 1; min-width: 0;"><div style="font-size: 1.75rem; font-weight: 900; line-height: 1.1; text-transform: uppercase;">${Utils.escapeHtml(stop.stop_name)}</div>`;
+    
+    if (metadata.mainDestination && state.selectedRoute) {
+      headerHTML += `<div style="font-size: 1.5rem; font-weight: 700; line-height: 1.2; text-transform: uppercase; display: flex; align-items: center; white-space: nowrap;"><span style="margin-right: 0.3em;">&#8594;</span><span style="overflow-wrap: anywhere;">${Utils.escapeHtml(metadata.mainDestination)}</span></div>`;
+    }
+    
+    headerHTML += '</div></div>';
+    
+    // Build complete modal
+    const modalHTML = `<div id="stop-timetable-modal" style="position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); z-index: 10000; display: flex; align-items: center; justify-content: center;">
+      <div style="background: white; padding: 0; border-radius: 8px; max-width: 1400px; max-height: 95vh; overflow-y: auto;">
+        ${headerHTML}
+        <table style="width: 100%; border-collapse: collapse; border: 1px solid #ddd;">
+          <thead>${tableHeaderHTML}</thead>
+          <tbody>${tableBodyHTML}</tbody>
+        </table>
+        ${legendHTML}
+      </div>
+    </div>`;
+    
+    // Add modal to DOM
+    const modalContainer = document.createElement('div');
+    modalContainer.innerHTML = modalHTML;
+    document.body.appendChild(modalContainer);
+    
+    // Setup close handlers
+    let modalClosed = false;
+    const closeModal = () => {
+      if (modalClosed) return;
+      modalClosed = true;
+      if (modalContainer && document.body.contains(modalContainer)) {
+        document.body.removeChild(modalContainer);
+      }
+      document.removeEventListener('keydown', handleEscape);
+    };
+    
+    const handleEscape = (e) => { 
+      if (e.key === 'Escape') closeModal(); 
+    };
+    
+    document.addEventListener('keydown', handleEscape);
+    
+    // Get modal element after adding to DOM
+    const modal = modalContainer.querySelector('#stop-timetable-modal');
+    if (modal) {
+      modal.onclick = (e) => { 
+        if (e.target.id === 'stop-timetable-modal') closeModal(); 
+      };
+    }
+    
+  } catch (err) {
+    console.error('[Timetable Modal] Error:', err);
+    alert('Nie udało się załadować rozkładu jazdy: ' + err.message);
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
 // 11. UI RENDERING - ROUTES VIEW
 // ═══════════════════════════════════════════════════════════════
 // ✅ Dodaj na początku pliku (obok innych stałych)
