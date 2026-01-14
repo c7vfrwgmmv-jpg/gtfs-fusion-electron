@@ -661,6 +661,171 @@ ipcMain.handle('query-shape', async (event, shapeId) => {
     conn.close();
   }
 });
+
+// Bulk query for route data - loads trips with embedded stop_times in one query
+ipcMain.handle('query-route-data-bulk', async (event, { routeId, date, directionId }) => {
+  if (!db) throw new Error('Database not loaded');
+  
+  const conn = db.connect();
+  
+  try {
+    console.log('[SQL] query-route-data-bulk START', { routeId, date, directionId });
+    
+    // Check which tables exist
+    const tables = await new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('Query timeout getting tables')), 10000);
+      conn.all(`SELECT table_name FROM information_schema.tables WHERE table_schema = 'main'`, 
+        (err, rows) => {
+          clearTimeout(timeout);
+          if (err) reject(err);
+          else resolve(rows);
+        });
+    });
+    
+    const tableSet = new Set(tables.map(t => t.table_name.toLowerCase()));
+    const hasCalendar = tableSet.has('calendar');
+    const hasCalendarDates = tableSet.has('calendar_dates');
+    const hasShapes = tableSet.has('shapes');
+    
+    // Parse date for day of week
+    const dateObj = new Date(
+      parseInt(date.substring(0, 4)),
+      parseInt(date.substring(4, 6)) - 1,
+      parseInt(date.substring(6, 8))
+    );
+    const dayNames = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+    const dayColumn = dayNames[dateObj.getDay()];
+    
+    // Build active_services CTE based on available tables
+    let activeServicesCTE;
+    let params;
+    
+    if (hasCalendar && hasCalendarDates) {
+      activeServicesCTE = `
+        WITH active_services AS (
+          SELECT service_id FROM calendar
+          WHERE start_date <= $1 AND end_date >= $2 AND ${dayColumn} = '1'
+          UNION
+          SELECT service_id FROM calendar_dates WHERE date = $3 AND exception_type = '1'
+          EXCEPT
+          SELECT service_id FROM calendar_dates WHERE date = $4 AND exception_type = '2'
+        )`;
+      params = [date, date, date, date, routeId, directionId];
+    } else if (hasCalendar) {
+      activeServicesCTE = `
+        WITH active_services AS (
+          SELECT service_id FROM calendar
+          WHERE start_date <= $1 AND end_date >= $2 AND ${dayColumn} = '1'
+        )`;
+      params = [date, date, routeId, directionId];
+    } else {
+      activeServicesCTE = 'WITH active_services AS (SELECT DISTINCT service_id FROM trips)';
+      params = [routeId, directionId];
+    }
+    
+    // Get trips columns dynamically
+    const tripsCols = await new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('Query timeout getting columns')), 10000);
+      conn.all(`SELECT column_name FROM information_schema.columns WHERE table_name = 'trips'`, 
+        (err, rows) => {
+          clearTimeout(timeout);
+          err ? reject(err) : resolve(rows);
+        });
+    });
+    const tripsColSet = new Set(tripsCols.map(c => c.column_name.toLowerCase()));
+    
+    // Build trips SELECT dynamically
+    const tripsSelect = ['t.route_id', 't.service_id', 't.trip_id'];
+    if (tripsColSet.has('trip_headsign')) tripsSelect.push('t.trip_headsign');
+    if (tripsColSet.has('trip_short_name')) tripsSelect.push('t.trip_short_name');
+    if (tripsColSet.has('direction_id')) tripsSelect.push('t.direction_id');
+    if (tripsColSet.has('block_id')) tripsSelect.push('t.block_id');
+    if (tripsColSet.has('shape_id')) tripsSelect.push('t.shape_id');
+    if (tripsColSet.has('wheelchair_accessible')) tripsSelect.push('t.wheelchair_accessible');
+    if (tripsColSet.has('bikes_allowed')) tripsSelect.push('t.bikes_allowed');
+    
+    // Main bulk query - returns trips with embedded stop_times as JSON
+    const query = `
+      ${activeServicesCTE},
+      route_trips AS (
+        SELECT ${tripsSelect.join(', ')}
+        FROM trips t
+        WHERE t.route_id = $${params.length - 1}
+          AND t.direction_id = $${params.length}
+          AND t.service_id IN (SELECT service_id FROM active_services)
+      )
+      SELECT 
+        t.*,
+        (
+          SELECT JSON_GROUP_ARRAY(
+            JSON_OBJECT(
+              'trip_id', st.trip_id,
+              'stop_id', st.stop_id,
+              'stop_sequence', st.stop_sequence,
+              'arrival_time', st.arrival_time,
+              'departure_time', st.departure_time,
+              'pickup_type', COALESCE(st.pickup_type, '0'),
+              'drop_off_type', COALESCE(st.drop_off_type, '0'),
+              'stop_name', s.stop_name,
+              'stop_lat', s.stop_lat,
+              'stop_lon', s.stop_lon
+            )
+          )
+          FROM (
+            SELECT st.*, s.stop_name, s.stop_lat, s.stop_lon
+            FROM stop_times st
+            JOIN stops s ON st.stop_id = s.stop_id
+            WHERE st.trip_id = t.trip_id
+            ORDER BY CAST(st.stop_sequence AS INTEGER)
+          ) st
+        ) as stop_times_json,
+        (
+          SELECT departure_time 
+          FROM stop_times 
+          WHERE trip_id = t.trip_id 
+          ORDER BY CAST(stop_sequence AS INTEGER) ASC 
+          LIMIT 1
+        ) as first_departure
+      FROM route_trips t
+      ORDER BY first_departure
+    `;
+    
+    console.log('[SQL] Executing bulk query with', params.length, 'params');
+    
+    const rows = await new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('Query timeout')), 60000); // 60s for large routes
+      conn.all(query, ...params, (err, rows) => {
+        clearTimeout(timeout);
+        if (err) {
+          console.error('[SQL] Bulk query error:', err);
+          reject(err);
+        } else {
+          resolve(rows);
+        }
+      });
+    });
+    
+    console.log('[SQL] query-route-data-bulk SUCCESS:', rows.length, 'trips');
+    
+    // Parse JSON for each trip and replace with parsed stop_times array
+    const tripsWithParsedStopTimes = rows.map(row => {
+      const { stop_times_json, ...tripData } = row;
+      return {
+        ...tripData,
+        stop_times: stop_times_json ? JSON.parse(stop_times_json) : []
+      };
+    });
+    
+    return convertBigIntsToNumbers(tripsWithParsedStopTimes);
+    
+  } catch (err) {
+    console.error('[SQL] query-route-data-bulk FAILED:', err);
+    throw err;
+  } finally {
+    conn.close();
+  }
+});
+
 ipcMain.handle('query-available-dates', async () => {
   if (!db) throw new Error('Database not loaded');
   
