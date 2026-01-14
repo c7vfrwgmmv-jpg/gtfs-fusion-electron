@@ -209,6 +209,10 @@ let state = {
   // Pagination state for stops list
   stopsListPage: 1,
   stopsListPageSize: 50,
+  stopsListTotalCount: 0,
+  stopsListLoading: false,
+  stopsListHasMore: true,
+  stopsListData: [], // Accumulated stops data
   
   // Virtual scrolling state for large stop lists
   virtualListStartIndex: 0,
@@ -5439,179 +5443,163 @@ function clearStopToRoutesCache() {
   cachedStopsWithRoutes = null;
 }
 
-async function renderStopsView() {
-  if (!state.gtfsData || !state.showStopsView) return;
+// Debounce utility (if not already present)
+function debounceSearch(func, wait) {
+  let timeout;
+  return function executedFunction(...args) {
+    const later = () => {
+      clearTimeout(timeout);
+      func(...args);
+    };
+    clearTimeout(timeout);
+    timeout = setTimeout(later, wait);
+  };
+}
+
+// Search handler with server-side FTS
+const handleStopsSearch = debounceSearch(async (searchQuery) => {
+  console.log('[Search] Query:', searchQuery);
   
+  // Reset pagination state
+  state.stopsListData = [];
+  state.stopsListPage = 1;
+  state.stopsListHasMore = true;
+  state.stopsListSearchQuery = searchQuery;
+  
+  // Reload stops list
+  await renderStopsView();
+}, 300); // 300ms debounce
+
+// Render stops list HTML
+function renderStopsList(groupsArray) {
   const stopsList = $('stops-list');
-  const stopsMap = $('stops-map');
-  if (!stopsList || !stopsMap) return;
+  if (!stopsList) return;
   
-  // Safety check: if indexes are empty (not yet populated), show a message
-  if (!state.gtfsData.stopsIndex || Object.keys(state.gtfsData.stopsIndex).length === 0) {
-    stopsList.innerHTML = '<div class="p-4 text-center text-gray-600">Dane przystanków nie są jeszcze załadowane.</div>';
-    return;
-  }
+  let html = '';
   
-  // Show loading indicator
-  stopsList.innerHTML = '<div class="p-4 text-center text-gray-600">Ładowanie przystanków...</div>';
-  
-  // Get stops with routes from SQL
-  const stopsData = await getStopsWithRoutes();
-  
-  // Sortuj alfabetycznie
-  stopsData.sort((a, b) => (a.stop_name || '').localeCompare(b.stop_name || ''));
-  
-  const groupsArray = getOrBuildGroupsArray(stopsData);
-  
-  const searchQuery = state.stopsListSearchQuery;
-  
-  // Use async search for large datasets to prevent UI freeze
-  let filteredGroups;
-  const useAsyncSearch = groupsArray.length > 1000 && searchQuery && searchQuery.trim() !== '';
-  
-  if (useAsyncSearch) {
-    // Show searching indicator
-    stopsList.innerHTML = '<div class="p-4 text-center text-gray-600">Wyszukiwanie...</div>';
-    filteredGroups = await searchStopsInIndexAsync(searchQuery, groupsArray, (percent) => {
-      stopsList.innerHTML = `<div class="p-4 text-center text-gray-600">Wyszukiwanie... ${percent}%</div>`;
-    });
-  } else {
-    // For smaller datasets, also use async search for consistency
-    filteredGroups = searchQuery && searchQuery.trim() !== '' 
-      ? await searchStopsInIndexAsync(searchQuery, groupsArray)
-      : groupsArray;
-  }
-  
-  const useVirtualList = filteredGroups.length > 100; // Threshold
-
-  if (useVirtualList) {
-    renderVirtualStopsList(filteredGroups);
-  } else {
-    const groupsPerPage = state.stopsListPageSize;
-    const totalGroups = filteredGroups.length;
-    const groupsToShow = filteredGroups.slice(0, state.stopsListPage * groupsPerPage);
-
-    let html = '';
-
-    groupsToShow.forEach(group => {
-      const isExpanded = state.expandedStopGroup === group.id;
-      const pluralForm = group.routeCount === 1 ? 'linia' : 
-        (group.routeCount % 10 >= 2 && group.routeCount % 10 <= 4 && (group.routeCount % 100 < 10 || group.routeCount % 100 >= 20)) 
-        ? 'linie' : 'linii';
-      
-      // For single-stop groups, make them directly clickable
-      if (group.isSingleStop) {
-        const stop = group.stops[0];
-        html += `
-          <div class="stop-group p-3 border-b hover:bg-blue-50 cursor-pointer" data-stop-id="${stop.stop_id}">
-            <div class="font-semibold">${Utils.escapeHtml(group.name)}</div>
-            <div class="text-xs text-gray-600">${group.routeCount} ${pluralForm}</div>
-          </div>
-        `;
-      } else {
-        // Multi-stop groups: show as expandable
-        html += `
-          <div class="stop-group p-3 border-b hover:bg-blue-50 cursor-pointer ${isExpanded ? 'bg-blue-50' : ''}" data-group-id="${Utils.escapeHtml(group.id)}">
-            <div class="font-semibold">${Utils.escapeHtml(group.name)}</div>
-            <div class="text-xs text-gray-600">${group.routeCount} ${pluralForm}</div>
-          </div>
-        `;
-        
-        // Poziom 2: Konkretne przystanki w grupie (tylko jeśli rozwinięta)
-        if (isExpanded) {
-          group.stops.forEach(stop => {
-            const stopPluralForm = stop.routeCount === 1 ? 'linia' : 
-              (stop.routeCount % 10 >= 2 && stop.routeCount % 10 <= 4 && (stop.routeCount % 100 < 10 || stop.routeCount % 100 >= 20)) 
-              ? 'linie' : 'linii';
-            
-            html += `
-              <div class="stop-item p-2 pl-6 border-b hover:bg-blue-100 cursor-pointer bg-white" data-stop-id="${stop.stop_id}">
-                <div class="font-medium text-sm">${Utils.escapeHtml(stop.stop_name)}</div>
-                <div class="text-xs text-gray-600">${stop.routeCount} ${stopPluralForm}</div>
-              </div>
-            `;
-          });
-        }
-      }
-    });
-
-    // Add "Load More" button if there are more groups to display
-    if (groupsToShow.length < totalGroups) {
-      const remaining = totalGroups - groupsToShow.length;
+  groupsArray.forEach(group => {
+    const isExpanded = state.expandedStopGroup === group.id;
+    const pluralForm = group.routeCount === 1 ? 'linia' : 
+      (group.routeCount % 10 >= 2 && group.routeCount % 10 <= 4 && 
+       (group.routeCount % 100 < 10 || group.routeCount % 100 >= 20)) 
+      ? 'linie' : 'linii';
+    
+    if (group.isSingleStop) {
+      const stop = group.stops[0];
       html += `
-        <div class="p-4 text-center">
-          <button id="load-more-stops" class="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600 transition">
-            Pokaż więcej (${remaining} pozostało)
-          </button>
+        <div class="stop-group p-3 border-b hover:bg-blue-50 cursor-pointer" 
+             data-stop-id="${stop.stop_id}">
+          <div class="font-semibold">${Utils.escapeHtml(group.name)}</div>
+          <div class="text-xs text-gray-600">${group.routeCount} ${pluralForm}</div>
         </div>
       `;
-    }
-
-    stopsList.innerHTML = html;
-
-    const loadMoreBtn = $('load-more-stops');
-    if (loadMoreBtn) {
-      loadMoreBtn.addEventListener('click', () => {
-        state.stopsListPage++;
-        renderStopsView();
-      });
-    }
-  }
-
-  // Setup scroll listener for virtual list rendering
-  if (useVirtualList) {
-    const container = stopsList.parentElement;
-    if (container) {
-      // Remove old listener if exists
-      if (container._virtualScrollHandler) {
-        container.removeEventListener('scroll', container._virtualScrollHandler);
+    } else {
+      html += `
+        <div class="stop-group p-3 border-b hover:bg-blue-50 cursor-pointer ${isExpanded ? 'bg-blue-50' : ''}" 
+             data-group-id="${Utils.escapeHtml(group.id)}">
+          <div class="font-semibold">${Utils.escapeHtml(group.name)}</div>
+          <div class="text-xs text-gray-600">${group.routeCount} ${pluralForm}</div>
+        </div>
+      `;
+      
+      if (isExpanded) {
+        group.stops.forEach(stop => {
+          const stopPluralForm = stop.routeCount === 1 ? 'linia' : 
+            (stop.routeCount % 10 >= 2 && stop.routeCount % 10 <= 4 && 
+             (stop.routeCount % 100 < 10 || stop.routeCount % 100 >= 20)) 
+            ? 'linie' : 'linii';
+          
+          html += `
+            <div class="stop-item p-2 pl-6 border-b hover:bg-blue-100 cursor-pointer bg-white" 
+                 data-stop-id="${stop.stop_id}">
+              <div class="font-medium text-sm">${Utils.escapeHtml(stop.stop_name)}</div>
+              <div class="text-xs text-gray-600">${stop.routeCount} ${stopPluralForm}</div>
+            </div>
+          `;
+        });
       }
-      
-      const scrollHandler = debounce(() => {
-        renderVirtualStopsList(filteredGroups);
-      }, 50);
-      
-      container._virtualScrollHandler = scrollHandler;
-      container.addEventListener('scroll', scrollHandler);
     }
+  });
+  
+  // Add loading indicator at bottom if more data available
+  if (state.stopsListHasMore && !state.stopsListLoading) {
+    html += `
+      <div id="stops-load-trigger" class="p-4 text-center text-gray-600">
+        Przewiń aby załadować więcej...
+      </div>
+    `;
+  } else if (state.stopsListLoading) {
+    html += `
+      <div class="p-4 text-center text-gray-600">
+        <div class="inline-block animate-spin rounded-full h-6 w-6 border-b-2 border-blue-500"></div>
+        <div class="mt-2">Ładowanie...</div>
+      </div>
+    `;
+  } else if (!state.stopsListHasMore && state.stopsListData.length > 0) {
+    html += `
+      <div class="p-4 text-center text-gray-500 text-sm">
+        Pokazano wszystkie przystanki (${state.stopsListData.length})
+      </div>
+    `;
   }
+  
+  stopsList.innerHTML = html;
+}
 
-  const searchInput = $('stops-search-input-header');
-  if (searchInput) {
-    // Update value to match current state
-    searchInput.value = state.stopsListSearchQuery;
-    
-    const oldHandler = searchInput._searchHandler;
-    if (oldHandler) {
-      searchInput.removeEventListener('input', oldHandler);
-    }
-    
-    const debouncedSearch = debounce((value) => {
-      state.stopsListSearchQuery = value;
-      state.stopsListPage = 1; // Reset pagination on new search
-      renderStopsView();
-    }, 500); // Debounce delay: 500ms for better UX
-    
-    const newHandler = (e) => {
-      debouncedSearch(e.target.value);
-    };
-    searchInput._searchHandler = newHandler;
-    searchInput.addEventListener('input', newHandler);
+// Setup infinite scroll with Intersection Observer
+function setupInfiniteScroll() {
+  const stopsList = $('stops-list');
+  if (!stopsList) return;
+  
+  const container = stopsList.parentElement;
+  if (!container) return;
+  
+  // Remove old observer if exists
+  if (container._infiniteScrollObserver) {
+    container._infiniteScrollObserver.disconnect();
   }
+  
+  // Create new observer
+  const observer = new IntersectionObserver(async (entries) => {
+    entries.forEach(async (entry) => {
+      if (entry.isIntersecting && 
+          state.stopsListHasMore && 
+          !state.stopsListLoading) {
+        
+        console.log('[InfiniteScroll] Loading next page...');
+        state.stopsListPage++;
+        await renderStopsView();
+      }
+    });
+  }, {
+    root: container,
+    threshold: 0.1,
+    rootMargin: '100px' // Start loading 100px before reaching bottom
+  });
+  
+  // Observe load trigger element
+  const trigger = $('stops-load-trigger');
+  if (trigger) {
+    observer.observe(trigger);
+  }
+  
+  // Store observer for cleanup
+  container._infiniteScrollObserver = observer;
+}
 
-  // Inicjalizuj mapę
+// Initialize stops map (only once)
+async function initializeStopsMap(stopsData) {
+  const stopsMap = $('stops-map');
+  if (!stopsMap) return;
+  
   stopsMap.innerHTML = '';
   
-  // Store reference to map in window for reuse
   if (window.stopsListMap) {
     try {
       window.stopsListMap.remove();
     } catch (e) {}
     window.stopsListMap = null;
   }
-  
-  // Initialize map immediately (removed setTimeout for better responsiveness)
-  if (!stopsMap || stopsMap.offsetParent === null) return;
   
   let initialCenter = [52.23, 21.01];
   let initialZoom = 12;
@@ -5623,224 +5611,132 @@ async function renderStopsView() {
   
   const map = window.L.map(stopsMap).setView(initialCenter, initialZoom);
   window.stopsListMap = map;
-	
-    window.L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-      attribution: '© OpenStreetMap contributors',
-      maxZoom: 19
-    }).addTo(map);
+  
+  window.L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    attribution: '© OpenStreetMap contributors',
+    maxZoom: 19
+  }).addTo(map);
+  
+  const markers = window.L.markerClusterGroup({
+    maxClusterRadius: 30,
+    spiderfyOnMaxZoom: true,
+    showCoverageOnHover: false,
+    disableClusteringAtZoom: 17
+  });
+  
+  const bounds = [];
+  
+  stopsData.forEach(stop => {
+    if (!stop.stop_lat || !stop.stop_lon) return;
+    const lat = parseFloat(stop.stop_lat);
+    const lon = parseFloat(stop.stop_lon);
+    if (isNaN(lat) || isNaN(lon)) return;
     
-    const markers = window.L.markerClusterGroup({
-      maxClusterRadius: 30,
-      spiderfyOnMaxZoom: true,
-      showCoverageOnHover: false,
-      disableClusteringAtZoom: 17,
-      iconCreateFunction: function(cluster) {
-        const count = cluster.getChildCount();
-        let c = ' marker-cluster-';
-        if (count < 10) {
-          c += 'small';
-        } else if (count < 100) {
-          c += 'medium';
-        } else {
-          c += 'large';
-        }
-        
-        return new window.L.DivIcon({ 
-          html: '<div><span>' + count + '</span></div>',
-          className: 'marker-cluster marker-cluster-neutral' + c,
-          iconSize: new window.L.Point(40, 40)
-        });
-      }
+    const marker = window.L.marker([lat, lon], {
+      icon: createSvgIcon('#3b82f6')
     });
     
-    const bounds = [];
-    
-    // Always show all stops as markers
-    stopsData.forEach(stop => {
-      if (!stop.stop_lat || !stop.stop_lon) return;
-      const lat = parseFloat(stop.stop_lat);
-      const lon = parseFloat(stop.stop_lon);
-      if (isNaN(lat) || isNaN(lon)) return;
-      
-      const marker = window.L.marker([lat, lon], {
-        icon: createSvgIcon('#3b82f6')
-      });
-      
-      // Popup behavior depends on whether a group is expanded
-      if (state.expandedStopGroup === null) {
-        // State 1: Lista pokazuje grupy - popup z klikalnym linkiem
-        marker.bindPopup(`
-          <a href="#" onclick="event.preventDefault(); 
-            (async () => {
-              state.selectedStop = state.gtfsData.stopsIndex['${stop.stop_id}']; 
-              state.stopViewFilteredRoutes = []; 
-			  state.stopsListMapState = null;
-              render();
-              await prepareStopDetailData(state.selectedStop, state.selectedDate);
-              render();
-            })();
-            return false;" 
-            style="text-decoration: none; color:inherit;">
-            <strong>${Utils.escapeHtml(stop.stop_name)}</strong><br>
-            ${stop.routeCount} ${stop.routeCount === 1 ? 'linia' : 
-              (stop.routeCount % 10 >= 2 && stop.routeCount % 10 <= 4 && (stop.routeCount % 100 < 10 || stop.routeCount % 100 >= 20)) 
-              ? 'linie' : 'linii'}
-          </a>
-        `, { 
-          closeButton: false  // Usuń "x"
-        });
-      } else {
-        // State 2: Lista pokazuje przystanki - bezpośrednie przejście do STOP_DETAIL
-        marker.on('click', async () => {
-          state.selectedStop = stop;
-          state.stopViewFilteredRoutes = [];
-          render(); // Show loading state first
-          await prepareStopDetailData(stop, state.selectedDate);
-          render(); // Re-render with data
-        });
-      }
-      
-      markers.addLayer(marker);
-      bounds.push([lat, lon]);
-    });
-    
-    map.addLayer(markers);
-    
-    // Center map on expanded group if any
-    if (state.expandedStopGroup && !state.stopsListMapState) {
-      const expandedGroup = groupsArray.find(g => g.id === state.expandedStopGroup);
-      if (expandedGroup && expandedGroup.stops.length > 0) {
-        const groupBounds = window.L.latLngBounds();
-        expandedGroup.stops.forEach(stop => {
-          if (stop.stop_lat && stop.stop_lon) {
-            const lat = parseFloat(stop.stop_lat);
-            const lon = parseFloat(stop.stop_lon);
-            if (!isNaN(lat) && !isNaN(lon)) {
-              groupBounds.extend([lat, lon]);
-            }
-          }
-        });
-        
-        if (groupBounds.isValid()) {
-          map.fitBounds(groupBounds, { padding: [50, 50], maxZoom: 20 });
-        }
-      }
-    } else if (bounds.length > 0 && !state.stopsListMapState) {
-      map.fitBounds(bounds, { padding: [50, 50], maxZoom: 15 });
-    }
-  
-  const stopsListContainer = stopsList.parentElement || stopsList;
-  
-  if (stopsListContainer) {
-    // Remove old handler
-    if (stopsListContainer._stopGroupHandler) {
-      stopsListContainer.removeEventListener('click', stopsListContainer._stopGroupHandler);
-    }
-    
-    const groupHandler = (e) => {
-      const stopGroup = e.target.closest('.stop-group');
-      if (!stopGroup) return;
-      
-      e.preventDefault();
-      e.stopPropagation();
-      
-      const groupId = stopGroup.getAttribute('data-group-id');
-      const stopId = stopGroup.getAttribute('data-stop-id');
-      
-      // Handle single-stop groups (they have data-stop-id instead of data-group-id)
-      if (!groupId && stopId) {
-        const stop = state.gtfsData.stopsIndex[stopId];
-        
-        if (stop) {
-          // Set map to selected stop
-          if (window.stopsListMap && stop.stop_lat && stop.stop_lon) {
-            window.stopsListMap.setView(
-              [parseFloat(stop.stop_lat), parseFloat(stop.stop_lon)],
-              17
-            );
-          }
-          
-          state.selectedStop = stop;
-          state.stopViewFilteredRoutes = [];
+    marker.bindPopup(`
+      <a href="#" onclick="event.preventDefault(); 
+        (async () => {
+          state.selectedStop = state.gtfsData.stopsIndex['${stop.stop_id}']; 
+          state.stopViewFilteredRoutes = []; 
+          state.stopsListMapState = null;
           render();
-          prepareStopDetailData(stop, state.selectedDate).then(() => render());
-        }
-        return;
-      }
-      
-      // Use cached groups array (stopsData is not in scope)
-      const group = cachedGroupsArray?.find(g => g.id === groupId);
-      
-      // Always zoom map to clicked group
-      if (group && group.stops.length > 0 && window.stopsListMap) {
-        const groupBounds = window.L.latLngBounds();
-        group.stops.forEach(stop => {
-          if (stop.stop_lat && stop.stop_lon) {
-            const lat = parseFloat(stop.stop_lat);
-            const lon = parseFloat(stop.stop_lon);
-            if (!isNaN(lat) && !isNaN(lon)) {
-              groupBounds.extend([lat, lon]);
-            }
-          }
-        });
-        
-        if (groupBounds.isValid()) {
-          window.stopsListMap.flyToBounds(groupBounds, { 
-            padding: [50, 50], 
-            maxZoom: 17,
-            duration: 0.5
-          });
-        }
-      }
-      
-      // Toggle expansion
-      if (state.expandedStopGroup === groupId) {
-        state.expandedStopGroup = null;
-      } else {
-        state.expandedStopGroup = groupId;
-      }
-      
-      renderStopsView();
-    };
+          await prepareStopDetailData(state.selectedStop, state.selectedDate);
+          render();
+        })();
+        return false;" 
+        style="text-decoration: none; color:inherit;">
+        <strong>${Utils.escapeHtml(stop.stop_name)}</strong><br>
+        ${stop.routeCount} ${stop.routeCount === 1 ? 'linia' : 
+          (stop.routeCount % 10 >= 2 && stop.routeCount % 10 <= 4 && 
+           (stop.routeCount % 100 < 10 || stop.routeCount % 100 >= 20)) 
+          ? 'linie' : 'linii'}
+      </a>
+    `, { closeButton: false });
     
-    stopsListContainer._stopGroupHandler = groupHandler;
-    stopsListContainer.addEventListener('click', groupHandler);
+    markers.addLayer(marker);
+    bounds.push([lat, lon]);
+  });
+  
+  map.addLayer(markers);
+  
+  if (bounds.length > 0 && !state.stopsListMapState) {
+    map.fitBounds(bounds, { padding: [50, 50], maxZoom: 15 });
   }
+}
 
-  const stopsList_el = $('stops-list');
-  if (stopsList_el) {
-    // Remove old handler if exists
-    if (stopsList_el._stopItemHandler) {
-      stopsList_el.removeEventListener('click', stopsList_el._stopItemHandler);
+async function renderStopsView() {
+  if (!state.gtfsData || !state.showStopsView) return;
+  
+  const stopsList = $('stops-list');
+  const stopsMap = $('stops-map');
+  if (!stopsList || !stopsMap) return;
+  
+  // Show loading indicator on first load
+  if (state.stopsListData.length === 0) {
+    stopsList.innerHTML = '<div class="p-4 text-center text-gray-600">Ładowanie przystanków...</div>';
+  }
+  
+  try {
+    const PAGE_SIZE = state.stopsListPageSize;
+    const searchQuery = state.stopsListSearchQuery || '';
+    const offset = (state.stopsListPage - 1) * PAGE_SIZE;
+    
+    // Get total count (only on first page or search change)
+    if (offset === 0) {
+      state.stopsListTotalCount = await window.electronAPI.queryStopsCount({ searchQuery });
+      console.log('[Stops] Total count:', state.stopsListTotalCount);
     }
     
-    const handler = (e) => {
-      const stopItem = e.target.closest('.stop-item');
-      if (!stopItem) return;
-      
-      const stopId = stopItem.getAttribute('data-stop-id');
-      const stop = state.gtfsData.stopsIndex[stopId];
-      
-if (stop) {
-  // USTAW MAPĘ na wybrany przystanek
-  if (window.stopsListMap && stop.stop_lat && stop.stop_lon) {
-    window.stopsListMap.setView(
-      [parseFloat(stop.stop_lat), parseFloat(stop.stop_lon)],
-      17 // lub twój ulubiony zoom
-    );
-  }
-
-  // NIE mroź stanu mapy tutaj!
-
-  state.selectedStop = stop;
-  state.stopViewFilteredRoutes = [];
-  render();
-  prepareStopDetailData(stop, state.selectedDate).then(() => render());
-}
-    };
+    // Load page of stops
+    state.stopsListLoading = true;
+    const newStops = await window.electronAPI.queryStopsPaginated({
+      searchQuery,
+      offset,
+      limit: PAGE_SIZE
+    });
     
-    stopsList_el._stopItemHandler = handler;
-    stopsList_el.addEventListener('click', handler);
+    console.log('[Stops] Loaded page', state.stopsListPage, ':', newStops.length, 'stops');
+    
+    // Append to accumulated data
+    if (offset === 0) {
+      state.stopsListData = newStops;
+    } else {
+      state.stopsListData = [...state.stopsListData, ...newStops];
+    }
+    
+    // Update hasMore flag
+    state.stopsListHasMore = state.stopsListData.length < state.stopsListTotalCount;
+    state.stopsListLoading = false;
+    
+    // Build groups from accumulated data
+    const groupsArray = getOrBuildGroupsArray(state.stopsListData);
+    
+    // Render list
+    renderStopsList(groupsArray);
+    
+    // Setup infinite scroll observer (only once)
+    setupInfiniteScroll();
+    
+    // Initialize or update map
+    if (!window.stopsListMap) {
+      await initializeStopsMap(state.stopsListData);
+    } else {
+      // Map exists but may need to be reattached if DOM was recreated
+      const stopsMap = $('stops-map');
+      if (stopsMap && !stopsMap.hasChildNodes()) {
+        // Map container is empty, reinitialize
+        window.stopsListMap = null;
+        await initializeStopsMap(state.stopsListData);
+      }
+    }
+    
+  } catch (err) {
+    console.error('[renderStopsView] Error:', err);
+    stopsList.innerHTML = '<div class="p-4 text-red-600">Błąd ładowania przystanków</div>';
+    state.stopsListLoading = false;
   }
 }
 
@@ -7548,6 +7444,142 @@ case VIEW.LOADING:
           render();
         });
       });
+      
+      // Setup search input handler for stops list (NEW)
+      const searchInput = $('stops-search-input-header');
+      if (searchInput) {
+        // Set initial value
+        searchInput.value = state.stopsListSearchQuery || '';
+        
+        // Remove old handler
+        if (searchInput._searchHandler) {
+          searchInput.removeEventListener('input', searchInput._searchHandler);
+        }
+        
+        // Add new debounced handler
+        const newHandler = (e) => {
+          const query = e.target.value;
+          handleStopsSearch(query);
+        };
+        
+        searchInput._searchHandler = newHandler;
+        searchInput.addEventListener('input', newHandler);
+      }
+      
+      // Setup click handlers for stop groups and items (NEW)
+      const stopsListContainer = $('stops-list')?.parentElement;
+      if (stopsListContainer) {
+        // Remove old handler
+        if (stopsListContainer._stopGroupHandler) {
+          stopsListContainer.removeEventListener('click', stopsListContainer._stopGroupHandler);
+        }
+        
+        const groupHandler = async (e) => {
+          // Handle single-stop groups (direct navigation)
+          const singleStopGroup = e.target.closest('.stop-group[data-stop-id]');
+          if (singleStopGroup) {
+            e.preventDefault();
+            e.stopPropagation();
+            
+            const stopId = singleStopGroup.getAttribute('data-stop-id');
+            const stop = state.gtfsData.stopsIndex[stopId];
+            
+            if (stop && window.stopsListMap) {
+              window.stopsListMap.setView(
+                [parseFloat(stop.stop_lat), parseFloat(stop.stop_lon)],
+                17
+              );
+            }
+            
+            if (stop) {
+              state.selectedStop = stop;
+              state.stopViewFilteredRoutes = [];
+              render();
+              await prepareStopDetailData(stop, state.selectedDate);
+              render();
+            }
+            return;
+          }
+          
+          // Handle multi-stop groups (expand/collapse)
+          const multiStopGroup = e.target.closest('.stop-group[data-group-id]');
+          if (multiStopGroup) {
+            e.preventDefault();
+            e.stopPropagation();
+            
+            const groupId = multiStopGroup.getAttribute('data-group-id');
+            
+            // Zoom map to group
+            if (window.stopsListMap) {
+              const groupStops = state.stopsListData.filter(s => {
+                const baseName = s.stop_name.replace(/\s+\d+[A-Za-z]?$/, '').trim();
+                return baseName === groupId;
+              });
+              
+              if (groupStops.length > 0) {
+                const groupBounds = window.L.latLngBounds();
+                groupStops.forEach(stop => {
+                  if (stop.stop_lat && stop.stop_lon) {
+                    const lat = parseFloat(stop.stop_lat);
+                    const lon = parseFloat(stop.stop_lon);
+                    if (!isNaN(lat) && !isNaN(lon)) {
+                      groupBounds.extend([lat, lon]);
+                    }
+                  }
+                });
+                
+                if (groupBounds.isValid()) {
+                  window.stopsListMap.flyToBounds(groupBounds, { 
+                    padding: [50, 50], 
+                    maxZoom: 17,
+                    duration: 0.5
+                  });
+                }
+              }
+            }
+            
+            // Toggle expansion
+            if (state.expandedStopGroup === groupId) {
+              state.expandedStopGroup = null;
+            } else {
+              state.expandedStopGroup = groupId;
+            }
+            
+            // Re-render list (without reloading data)
+            const groupsArray = getOrBuildGroupsArray(state.stopsListData);
+            renderStopsList(groupsArray);
+            setupInfiniteScroll(); // Re-setup observer after re-render
+          }
+          
+          // Handle individual stop items
+          const stopItem = e.target.closest('.stop-item[data-stop-id]');
+          if (stopItem) {
+            e.preventDefault();
+            e.stopPropagation();
+            
+            const stopId = stopItem.getAttribute('data-stop-id');
+            const stop = state.gtfsData.stopsIndex[stopId];
+            
+            if (stop && window.stopsListMap) {
+              window.stopsListMap.setView(
+                [parseFloat(stop.stop_lat), parseFloat(stop.stop_lon)],
+                17
+              );
+            }
+            
+            if (stop) {
+              state.selectedStop = stop;
+              state.stopViewFilteredRoutes = [];
+              render();
+              await prepareStopDetailData(stop, state.selectedDate);
+              render();
+            }
+          }
+        };
+        
+        stopsListContainer._stopGroupHandler = groupHandler;
+        stopsListContainer.addEventListener('click', groupHandler);
+      }
       
       $('back-button')?.addEventListener('click', () => {
     if (state.selectedStop) {

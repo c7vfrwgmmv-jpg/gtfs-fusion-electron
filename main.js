@@ -205,13 +205,32 @@ async function buildDatabaseFromZip(zipPath, dbPath, metaPath, hash, sendProgres
     }
     
     sendProgress('Building indexes...', 92);
+    
+    // Check if parent_station column exists before creating index
+    let hasParentStation = false;
+    try {
+      const columnCheck = await allAsync("PRAGMA table_info(stops)");
+      hasParentStation = columnCheck.some(col => col.name === 'parent_station');
+      console.log('[DB] parent_station column exists:', hasParentStation);
+    } catch (err) {
+      console.warn('[DB] Could not check for parent_station column:', err);
+    }
+    
+    // Create indexes conditionally
+    const parentStationIndex = hasParentStation 
+      ? 'CREATE INDEX IF NOT EXISTS idx_stops_parent ON stops(parent_station);' 
+      : '';
+    
     await execAsync(`
       CREATE INDEX IF NOT EXISTS idx_trips_route ON trips(route_id);
       CREATE INDEX IF NOT EXISTS idx_trips_service ON trips(service_id);
       CREATE INDEX IF NOT EXISTS idx_stop_times_trip ON stop_times(trip_id);
       CREATE INDEX IF NOT EXISTS idx_stop_times_trip_seq ON stop_times(trip_id, stop_sequence);
+      CREATE INDEX IF NOT EXISTS idx_stop_times_stop ON stop_times(stop_id);
       CREATE INDEX IF NOT EXISTS idx_calendar_service ON calendar(service_id);
       CREATE INDEX IF NOT EXISTS idx_calendar_dates_date ON calendar_dates(date);
+      CREATE INDEX IF NOT EXISTS idx_stops_name ON stops(stop_name);
+      ${parentStationIndex}
     `);
     
     await execAsync('VACUUM');
@@ -1242,6 +1261,218 @@ ipcMain.handle('query-stops-with-routes', async () => {
   } catch (err) {
     console.error('[SQL] query-stops-with-routes FAILED:', err);
     throw err;
+  } finally {
+    conn.close();
+  }
+});
+
+// Query stops with pagination and search (NEW - for infinite scroll)
+ipcMain.handle('query-stops-paginated', async (event, { searchQuery, offset, limit }) => {
+  if (!db) throw new Error('Database not loaded');
+  
+  const conn = db.connect();
+  
+  try {
+    console.log('[SQL] query-stops-paginated', { searchQuery, offset, limit });
+    
+    // Check if parent_station column exists
+    let hasParentStation = false;
+    try {
+      const columnCheck = await new Promise((resolve, reject) => {
+        conn.all("PRAGMA table_info(stops)", (err, rows) => {
+          err ? reject(err) : resolve(rows);
+        });
+      });
+      hasParentStation = columnCheck.some(col => col.name === 'parent_station');
+      console.log('[SQL] parent_station column exists:', hasParentStation);
+    } catch (err) {
+      console.warn('[SQL] Could not check for parent_station column:', err);
+    }
+    
+    // Build query with conditional parent_station
+    const parentStationSelect = hasParentStation ? 's.parent_station,' : '';
+    const parentStationGroup = hasParentStation ? 's.parent_station, ' : '';
+    
+    let query, params;
+    const safeLimit = Math.min(Math.max(1, limit || 50), 200); // Cap at 200 for safety
+    const safeOffset = Math.max(0, offset || 0);
+    
+    if (searchQuery && searchQuery.trim()) {
+      // SEARCH MODE: Use ILIKE (case-insensitive) on stop_name only
+      const searchTerm = `%${searchQuery.trim()}%`;
+      
+      query = `
+        WITH distinct_routes AS (
+          SELECT DISTINCT
+            s.stop_id,
+            r.route_id,
+            r.route_short_name,
+            r.route_long_name,
+            r.route_type
+          FROM stops s
+          LEFT JOIN stop_times st ON s.stop_id = st.stop_id
+          LEFT JOIN trips t ON st.trip_id = t.trip_id
+          LEFT JOIN routes r ON t.route_id = r.route_id
+          WHERE s.stop_name ILIKE ?
+        ),
+        stop_routes AS (
+          SELECT 
+            s.stop_id,
+            s.stop_name,
+            s.stop_lat,
+            s.stop_lon,
+            ${parentStationSelect}
+            LIST(
+              CASE 
+                WHEN dr.route_id IS NOT NULL 
+                THEN STRUCT_PACK(
+                  route_id := dr.route_id,
+                  route_short_name := dr.route_short_name,
+                  route_long_name := dr.route_long_name,
+                  route_type := dr.route_type
+                )
+                ELSE NULL
+              END
+            ) as routes_list,
+            COUNT(dr.route_id) as route_count
+          FROM stops s
+          LEFT JOIN distinct_routes dr ON s.stop_id = dr.stop_id
+          WHERE s.stop_name ILIKE ?
+          GROUP BY s.stop_id, s.stop_name, s.stop_lat, s.stop_lon, ${parentStationGroup}
+          ORDER BY s.stop_name
+          LIMIT ? OFFSET ?
+        )
+        SELECT * FROM stop_routes
+      `;
+      params = [searchTerm, searchTerm, safeLimit, safeOffset];
+      
+    } else {
+      // BROWSE MODE: Alphabetical pagination
+      query = `
+        WITH distinct_routes AS (
+          SELECT DISTINCT
+            s.stop_id,
+            r.route_id,
+            r.route_short_name,
+            r.route_long_name,
+            r.route_type
+          FROM stops s
+          LEFT JOIN stop_times st ON s.stop_id = st.stop_id
+          LEFT JOIN trips t ON st.trip_id = t.trip_id
+          LEFT JOIN routes r ON t.route_id = r.route_id
+        ),
+        stop_routes AS (
+          SELECT 
+            s.stop_id,
+            s.stop_name,
+            s.stop_lat,
+            s.stop_lon,
+            ${parentStationSelect}
+            LIST(
+              CASE 
+                WHEN dr.route_id IS NOT NULL 
+                THEN STRUCT_PACK(
+                  route_id := dr.route_id,
+                  route_short_name := dr.route_short_name,
+                  route_long_name := dr.route_long_name,
+                  route_type := dr.route_type
+                )
+                ELSE NULL
+              END
+            ) as routes_list,
+            COUNT(dr.route_id) as route_count
+          FROM stops s
+          LEFT JOIN distinct_routes dr ON s.stop_id = dr.stop_id
+          GROUP BY s.stop_id, s.stop_name, s.stop_lat, s.stop_lon, ${parentStationGroup}
+          ORDER BY s.stop_name
+          LIMIT ? OFFSET ?
+        )
+        SELECT * FROM stop_routes
+      `;
+      params = [safeLimit, safeOffset];
+    }
+    
+    const rows = await new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('Query timeout')), 30000);
+      conn.all(query, ...params, (err, rows) => {
+        clearTimeout(timeout);
+        if (err) {
+          console.error('[SQL] query-stops-paginated ERROR:', err);
+          reject(err);
+        } else {
+          resolve(rows);
+        }
+      });
+    });
+    
+    // Parse results in main process
+    const result = rows.map(row => {
+      const stopData = {
+        stop_id: row.stop_id,
+        stop_name: row.stop_name,
+        stop_lat: row.stop_lat,
+        stop_lon: row.stop_lon,
+        routes: row.routes_list ? row.routes_list.filter(r => r !== null) : [],
+        routeCount: Number(row.route_count || 0)
+      };
+      
+      // Only add parent_station if it exists in the schema
+      if (hasParentStation) {
+        stopData.parent_station = row.parent_station;
+      }
+      
+      return stopData;
+    });
+    
+    console.log('[SQL] query-stops-paginated SUCCESS:', result.length, 'stops');
+    return convertBigIntsToNumbers(result);
+    
+  } catch (err) {
+    console.error('[SQL] query-stops-paginated FAILED:', err);
+    throw err;
+  } finally {
+    conn.close();
+  }
+});
+
+// Query total count of stops (with optional search filter)
+ipcMain.handle('query-stops-count', async (event, { searchQuery }) => {
+  if (!db) throw new Error('Database not loaded');
+  
+  const conn = db.connect();
+  
+  try {
+    let query, params;
+    
+    if (searchQuery && searchQuery.trim()) {
+      // Count ILIKE matches on stop_name only
+      const searchTerm = `%${searchQuery.trim()}%`;
+      query = `
+        SELECT COUNT(*) as count 
+        FROM stops 
+        WHERE stop_name ILIKE ?
+      `;
+      params = [searchTerm];
+    } else {
+      // Count all stops
+      query = `SELECT COUNT(*) as count FROM stops`;
+      params = [];
+    }
+    
+    const result = await new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('Query timeout')), 10000);
+      conn.all(query, ...params, (err, rows) => {
+        clearTimeout(timeout);
+        if (err) {
+          reject(err);
+        } else {
+          resolve(rows && rows.length > 0 ? rows[0] : { count: 0 });
+        }
+      });
+    });
+    
+    return Number(result.count || 0);
+    
   } finally {
     conn.close();
   }
