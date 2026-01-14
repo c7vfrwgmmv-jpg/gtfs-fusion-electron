@@ -520,6 +520,20 @@ ipcMain.handle('query-trips', async (event, { routeId, date, directionId }) => {
       `;
       params = [date, date, routeId, direction];
       
+    } else if (hasCalendarDates) {
+      // Fallback: only calendar_dates.txt
+      query = `
+        WITH active_services AS (
+          SELECT service_id FROM calendar_dates 
+          WHERE date = $1 AND exception_type = '1'
+        )
+        SELECT ${selectClauses.join(', ')}
+        FROM trips t
+        WHERE t.route_id = $2 AND t.direction_id = $3 AND t.service_id IN (SELECT service_id FROM active_services)
+        ORDER BY first_departure
+      `;
+      params = [date, routeId, direction];
+      
     } else {
       query = `
         SELECT ${selectClauses.join(', ')}
@@ -718,6 +732,14 @@ ipcMain.handle('query-route-data-bulk', async (event, { routeId, date, direction
           WHERE start_date <= $1 AND end_date >= $2 AND ${dayColumn} = '1'
         )`;
       params = [date, date, routeId, directionId];
+    } else if (hasCalendarDates) {
+      // Fallback: only calendar_dates.txt
+      activeServicesCTE = `
+        WITH active_services AS (
+          SELECT service_id FROM calendar_dates 
+          WHERE date = $1 AND exception_type = '1'
+        )`;
+      params = [date, routeId, directionId];
     } else {
       activeServicesCTE = 'WITH active_services AS (SELECT DISTINCT service_id FROM trips)';
       params = [routeId, directionId];
@@ -853,26 +875,75 @@ ipcMain.handle('query-available-dates', async () => {
   const conn = db.connect();
   
   try {
-    console. log('[SQL] query-available-dates START');
+    console.log('[SQL] query-available-dates START');
     
-    const rows = await new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        console.error('[SQL] query-available-dates TIMEOUT');
-        reject(new Error('Query timeout'));
-      }, 10000);
-      
-      conn.all(`SELECT DISTINCT start_date, end_date FROM calendar ORDER BY start_date`, 
+    // Check which tables exist
+    const tables = await new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('Query timeout getting tables')), 10000);
+      conn.all(`SELECT table_name FROM information_schema.tables WHERE table_schema = 'main'`, 
         (err, rows) => {
           clearTimeout(timeout);
-          if (err) {
-            console.error('[SQL] query-available-dates ERROR:', err);
-            reject(err);
-          } else {
-            console.log('[SQL] query-available-dates SUCCESS:', rows.length, 'rows');
-            resolve(rows);
-          }
+          if (err) reject(err);
+          else resolve(rows);
         });
     });
+    
+    const tableSet = new Set(tables.map(t => t.table_name.toLowerCase()));
+    const hasCalendar = tableSet.has('calendar');
+    const hasCalendarDates = tableSet.has('calendar_dates');
+    
+    let rows = [];
+    
+    if (hasCalendar) {
+      // Use calendar.txt for date ranges
+      rows = await new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          console.error('[SQL] query-available-dates TIMEOUT');
+          reject(new Error('Query timeout'));
+        }, 10000);
+        
+        conn.all(`SELECT DISTINCT start_date, end_date FROM calendar ORDER BY start_date`, 
+          (err, rows) => {
+            clearTimeout(timeout);
+            if (err) {
+              console.error('[SQL] query-available-dates ERROR:', err);
+              reject(err);
+            } else {
+              console.log('[SQL] query-available-dates SUCCESS (calendar):', rows.length, 'rows');
+              resolve(rows);
+            }
+          });
+      });
+    } else if (hasCalendarDates) {
+      // Fallback: Use calendar_dates.txt - get individual dates with exception_type=1
+      const dateRows = await new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          console.error('[SQL] query-available-dates TIMEOUT');
+          reject(new Error('Query timeout'));
+        }, 10000);
+        
+        conn.all(`SELECT DISTINCT date FROM calendar_dates WHERE exception_type = '1' ORDER BY date`, 
+          (err, rows) => {
+            clearTimeout(timeout);
+            if (err) {
+              console.error('[SQL] query-available-dates ERROR:', err);
+              reject(err);
+            } else {
+              console.log('[SQL] query-available-dates SUCCESS (calendar_dates):', rows.length, 'dates');
+              resolve(rows);
+            }
+          });
+      });
+      
+      // Convert individual dates to ranges (each date is its own range)
+      rows = dateRows.map(row => ({
+        start_date: row.date,
+        end_date: row.date
+      }));
+    } else {
+      console.warn('[SQL] No calendar or calendar_dates tables found');
+      rows = [];
+    }
     
     return convertBigIntsToNumbers(rows || []);
     
@@ -898,10 +969,6 @@ ipcMain.handle('query-departures-for-stop', async (event, { stopId, date }) => {
       throw new Error('stopId is required');
     }
     
-    if (!date || date.length !== 8) {
-      throw new Error('date must be in YYYYMMDD format');
-    }
-    
     // Check which tables exist
     const tables = await new Promise((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error('Query timeout getting tables')), 10000);
@@ -917,79 +984,109 @@ ipcMain.handle('query-departures-for-stop', async (event, { stopId, date }) => {
     const hasCalendar = tableSet.has('calendar');
     const hasCalendarDates = tableSet.has('calendar_dates');
     
-    // Parse date for day of week
-    const dateObj = new Date(
-      parseInt(date.substring(0, 4)),
-      parseInt(date.substring(4, 6)) - 1,
-      parseInt(date.substring(6, 8))
-    );
-    const dayNames = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
-    const dayColumn = dayNames[dateObj.getDay()];
-    
-    // Build query based on available tables
     let query;
     let params;
     
-    if (hasCalendar && hasCalendarDates) {
-      query = `
-        WITH active_services AS (
-          SELECT service_id FROM calendar
-          WHERE start_date <= $1 AND end_date >= $2 AND ${dayColumn} = '1'
-          UNION
-          SELECT service_id FROM calendar_dates WHERE date = $3 AND exception_type = '1'
-          EXCEPT
-          SELECT service_id FROM calendar_dates WHERE date = $4 AND exception_type = '2'
-        )
-        SELECT 
-          t.trip_id,
-          st.departure_time,
-          t.trip_headsign,
-          r.route_short_name,
-          r.route_long_name,
-          r.route_type,
-          r.route_id,
-          t.direction_id,
-          t.service_id
-        FROM stop_times st
-        JOIN trips t ON st.trip_id = t.trip_id
-        JOIN routes r ON t.route_id = r.route_id
-        WHERE st.stop_id = $5 
-          AND t.service_id IN (SELECT service_id FROM active_services)
-        ORDER BY st.departure_time
-      `;
-      params = [date, date, date, date, stopId];
+    if (date && (hasCalendar || hasCalendarDates)) {
+      // Parse date for day of week
+      const dateObj = new Date(
+        parseInt(date.substring(0, 4)),
+        parseInt(date.substring(4, 6)) - 1,
+        parseInt(date.substring(6, 8))
+      );
+      const dayNames = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+      const dayColumn = dayNames[dateObj.getDay()];
       
-    } else if (hasCalendar) {
-      query = `
-        WITH active_services AS (
-          SELECT service_id FROM calendar
-          WHERE start_date <= $1 AND end_date >= $2 AND ${dayColumn} = '1'
-        )
-        SELECT 
-          t.trip_id,
-          st.departure_time,
-          t.trip_headsign,
-          r.route_short_name,
-          r.route_long_name,
-          r.route_type,
-          r.route_id,
-          t.direction_id,
-          t.service_id
-        FROM stop_times st
-        JOIN trips t ON st.trip_id = t.trip_id
-        JOIN routes r ON t.route_id = r.route_id
-        WHERE st.stop_id = $3
-          AND t.service_id IN (SELECT service_id FROM active_services)
-        ORDER BY st.departure_time
-      `;
-      params = [date, date, stopId];
-      
+      if (hasCalendar && hasCalendarDates) {
+        query = `
+          WITH active_services AS (
+            SELECT service_id FROM calendar
+            WHERE start_date <= $1 AND end_date >= $2 AND ${dayColumn} = '1'
+            UNION
+            SELECT service_id FROM calendar_dates WHERE date = $3 AND exception_type = '1'
+            EXCEPT
+            SELECT service_id FROM calendar_dates WHERE date = $4 AND exception_type = '2'
+          )
+          SELECT 
+            t.trip_id,
+            st.departure_time,
+            st.arrival_time,
+            t.trip_headsign,
+            r.route_short_name,
+            r.route_long_name,
+            r.route_type,
+            r.route_id,
+            t.direction_id,
+            t.service_id
+          FROM stop_times st
+          JOIN trips t ON st.trip_id = t.trip_id
+          JOIN routes r ON t.route_id = r.route_id
+          WHERE st.stop_id = $5 
+            AND t.service_id IN (SELECT service_id FROM active_services)
+          ORDER BY r.route_short_name, st.departure_time
+        `;
+        params = [date, date, date, date, stopId];
+        
+      } else if (hasCalendarDates) {
+        // Fallback: only calendar_dates.txt
+        query = `
+          WITH active_services AS (
+            SELECT service_id FROM calendar_dates 
+            WHERE date = $1 AND exception_type = '1'
+          )
+          SELECT 
+            t.trip_id,
+            st.departure_time,
+            st.arrival_time,
+            t.trip_headsign,
+            r.route_short_name,
+            r.route_long_name,
+            r.route_type,
+            r.route_id,
+            t.direction_id,
+            t.service_id
+          FROM stop_times st
+          JOIN trips t ON st.trip_id = t.trip_id
+          JOIN routes r ON t.route_id = r.route_id
+          WHERE st.stop_id = $2
+            AND t.service_id IN (SELECT service_id FROM active_services)
+          ORDER BY r.route_short_name, st.departure_time
+        `;
+        params = [date, stopId];
+        
+      } else if (hasCalendar) {
+        query = `
+          WITH active_services AS (
+            SELECT service_id FROM calendar
+            WHERE start_date <= $1 AND end_date >= $2 AND ${dayColumn} = '1'
+          )
+          SELECT 
+            t.trip_id,
+            st.departure_time,
+            st.arrival_time,
+            t.trip_headsign,
+            r.route_short_name,
+            r.route_long_name,
+            r.route_type,
+            r.route_id,
+            t.direction_id,
+            t.service_id
+          FROM stop_times st
+          JOIN trips t ON st.trip_id = t.trip_id
+          JOIN routes r ON t.route_id = r.route_id
+          WHERE st.stop_id = $3
+            AND t.service_id IN (SELECT service_id FROM active_services)
+          ORDER BY r.route_short_name, st.departure_time
+        `;
+        params = [date, date, stopId];
+      }
     } else {
-      // No calendar tables - return all departures at this stop
+      // No date filter or no calendar tables
       query = `
         SELECT 
           t.trip_id,
           st.departure_time,
+          st.arrival_time,
           t.trip_headsign,
           r.route_short_name,
           r.route_long_name,
@@ -1001,7 +1098,7 @@ ipcMain.handle('query-departures-for-stop', async (event, { stopId, date }) => {
         JOIN trips t ON st.trip_id = t.trip_id
         JOIN routes r ON t.route_id = r.route_id
         WHERE st.stop_id = $1
-        ORDER BY st.departure_time
+        ORDER BY r.route_short_name, st.departure_time
       `;
       params = [stopId];
     }
@@ -1222,6 +1319,29 @@ ipcMain.handle('query-routes-at-stop', async (event, { stopId, date }) => {
         ORDER BY r.route_short_name
       `;
       params = [date, date, stopId];
+      
+    } else if (hasCalendarDates) {
+      // Fallback: only calendar_dates.txt
+      query = `
+        WITH active_services AS (
+          SELECT service_id FROM calendar_dates 
+          WHERE date = $1 AND exception_type = '1'
+        )
+        SELECT DISTINCT 
+          r.route_id,
+          r.route_short_name,
+          r.route_long_name,
+          r.route_type,
+          COUNT(DISTINCT t.trip_id) as trip_count
+        FROM stop_times st
+        JOIN trips t ON st.trip_id = t.trip_id
+        JOIN routes r ON t.route_id = r.route_id
+        WHERE st.stop_id = $2
+          AND t.service_id IN (SELECT service_id FROM active_services)
+        GROUP BY r.route_id, r.route_short_name, r.route_long_name, r.route_type
+        ORDER BY r.route_short_name
+      `;
+      params = [date, stopId];
       
     } else {
       // No calendar tables - return all routes at this stop
