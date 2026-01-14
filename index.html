@@ -1392,7 +1392,7 @@ async function loadRoutesForUI() {
     });
     
     // ✅ Convert object to array of groups
-    state.gtfsData. logicalRoutes = Object.values(grouped);
+    state.gtfsData.logicalRoutes = buildLogicalRoutes(routes, state.gtfsData.agenciesIndex);
     state.gtfsData.routes = routes;
     
     console.log('[App] loadRoutesForUI - created', state.gtfsData.logicalRoutes.length, 'logical route groups');
