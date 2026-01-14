@@ -3820,10 +3820,30 @@ async function renderStopDetailMap(stopId, selectedDate, filteredRouteIds = []) 
       if (mainRouteStops.length > 1) {
         let lineGeometry = null;
         
-        // Use hybrid approach: shapes.txt + gap filling, or straight lines
-        lineGeometry = await generateHybridLineGeometry(mainRouteStops, shapeId, route.route_type);
-
-        // Draw polyline if we have at least 2 points
+        if (shapeId) {
+          try {
+            lineGeometry = await getSimplifiedShape(shapeId);
+            if (lineGeometry && lineGeometry.length === 0) {
+              lineGeometry = null;
+            }
+          } catch (err) {
+            console.warn('[Stop Detail Map] Failed to load shape, using fallback:', err);
+            lineGeometry = null;
+          }
+        }
+        
+        if (!lineGeometry) {
+          try {
+            lineGeometry = await generateLineGeometry(mainRouteStops, route.route_type);
+          } catch (err) {
+            console.warn('[Stop Detail Map] generateLineGeometry failed, using straight lines:', err);
+          }
+        }
+        
+        if (!lineGeometry || lineGeometry.length < 2) {
+          lineGeometry = mainRouteStops.map(s => [s.lat, s.lon]).filter(([lat, lon]) => !isNaN(lat) && !isNaN(lon));
+        }
+        
         if (Array.isArray(lineGeometry) && lineGeometry.length > 1) {
           window.L.polyline(lineGeometry, {
             color: color,
@@ -4852,16 +4872,21 @@ async function renderStopsView() {
     // Setup infinite scroll observer (only once)
     setupInfiniteScroll();
     
-    // Initialize or update map
+    // Initialize or update map with ALL stops
     if (!window.stopsListMap) {
-      await initializeStopsMap(state.stopsListData);
+      const allStopsForMap = await window.electronAPI.queryAllStopsForMap({
+        searchQuery: state.stopsListSearchQuery || ''
+      });
+      await initializeStopsMap(allStopsForMap);
     } else {
-      // Map exists but may need to be reattached if DOM was recreated
+      // If search changed, update map markers
       const stopsMap = $('stops-map');
       if (stopsMap && !stopsMap.hasChildNodes()) {
-        // Map container is empty, reinitialize
         window.stopsListMap = null;
-        await initializeStopsMap(state.stopsListData);
+        const allStopsForMap = await window.electronAPI.queryAllStopsForMap({
+          searchQuery: state.stopsListSearchQuery || ''
+        });
+        await initializeStopsMap(allStopsForMap);
       }
     }
     

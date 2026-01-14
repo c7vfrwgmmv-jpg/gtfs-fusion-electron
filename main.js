@@ -1376,6 +1376,53 @@ ipcMain.handle('query-stops-with-routes', async () => {
   }
 });
 
+// Get ALL stops for map (lightweight - only coords and names)
+ipcMain.handle('query-all-stops-for-map', async (event, { searchQuery = '' }) => {
+  if (!db) throw new Error('Database not loaded');
+  
+  const conn = db.connect();
+  
+  try {
+    const whereClauses = [];
+    const params = [];
+    
+    if (searchQuery) {
+      whereClauses.push('stop_name LIKE ?');
+      params.push(`%${searchQuery}%`);
+    }
+    
+    const whereClause = whereClauses.length > 0 ? `WHERE ${whereClauses.join(' AND ')}` : '';
+    
+    // Count routes per stop
+    const query = `
+      SELECT 
+        s.stop_id,
+        s.stop_name,
+        s.stop_lat,
+        s.stop_lon,
+        COUNT(DISTINCT t.route_id) as routeCount
+      FROM stops s
+      LEFT JOIN stop_times st ON s.stop_id = st.stop_id
+      LEFT JOIN trips t ON st.trip_id = t.trip_id
+      ${whereClause}
+      GROUP BY s.stop_id, s.stop_name, s.stop_lat, s.stop_lon
+      ORDER BY s.stop_name
+    `;
+    
+    const rows = await new Promise((resolve, reject) => {
+      conn.all(query, params, (err, rows) => {
+        err ? reject(err) : resolve(rows);
+      });
+    });
+    
+    console.log('[SQL] query-all-stops-for-map SUCCESS:', rows.length, 'stops');
+    return convertBigIntsToNumbers(rows);
+    
+  } finally {
+    conn.close();
+  }
+});
+
 // Query stops with pagination and search (NEW - for infinite scroll)
 ipcMain.handle('query-stops-paginated', async (event, { searchQuery, offset, limit }) => {
   if (!db) throw new Error('Database not loaded');
