@@ -4819,6 +4819,124 @@ async function initializeStopsMap(stopsData) {
   }
 }
 
+// Setup click handlers for stop groups and items
+function setupStopClickHandlers() {
+  const stopsListContainer = $('stops-list')?.parentElement;
+  if (!stopsListContainer) return;
+  
+  // Remove old handler
+  if (stopsListContainer._stopGroupHandler) {
+    stopsListContainer.removeEventListener('click', stopsListContainer._stopGroupHandler);
+  }
+  
+  const groupHandler = async (e) => {
+    // Handle single-stop groups (direct navigation)
+    const singleStopGroup = e.target.closest('.stop-group[data-stop-id]');
+    if (singleStopGroup) {
+      e.preventDefault();
+      e.stopPropagation();
+      
+      const stopId = singleStopGroup.getAttribute('data-stop-id');
+      const stop = state.gtfsData.stopsIndex[stopId];
+      
+      if (stop && window.stopsListMap) {
+        window.stopsListMap.setView(
+          [parseFloat(stop.stop_lat), parseFloat(stop.stop_lon)],
+          17
+        );
+      }
+      
+      if (stop) {
+        state.selectedStop = stop;
+        state.stopViewFilteredRoutes = [];
+        render();
+        await prepareStopDetailData(stop, state.selectedDate);
+        render();
+      }
+      return;
+    }
+    
+    // Handle multi-stop groups (expand/collapse)
+    const multiStopGroup = e.target.closest('.stop-group[data-group-id]');
+    if (multiStopGroup) {
+      e.preventDefault();
+      e.stopPropagation();
+      
+      const groupId = multiStopGroup.getAttribute('data-group-id');
+      
+      // Zoom map to group
+      if (window.stopsListMap) {
+        const groupStops = state.stopsListData.filter(s => {
+          const baseName = s.stop_name.replace(/\s+\d+[A-Za-z]?$/, '').trim();
+          return baseName === groupId;
+        });
+        
+        if (groupStops.length > 0) {
+          const groupBounds = window.L.latLngBounds();
+          groupStops.forEach(stop => {
+            if (stop.stop_lat && stop.stop_lon) {
+              const lat = parseFloat(stop.stop_lat);
+              const lon = parseFloat(stop.stop_lon);
+              if (!isNaN(lat) && !isNaN(lon)) {
+                groupBounds.extend([lat, lon]);
+              }
+            }
+          });
+          
+          if (groupBounds.isValid()) {
+            window.stopsListMap.flyToBounds(groupBounds, { 
+              padding: [50, 50], 
+              maxZoom: 17,
+              duration: 0.5
+            });
+          }
+        }
+      }
+      
+      // Toggle expansion
+      if (state.expandedStopGroup === groupId) {
+        state.expandedStopGroup = null;
+      } else {
+        state.expandedStopGroup = groupId;
+      }
+      
+      // Re-render list
+      const groupsArray = getOrBuildGroupsArray(state.stopsListData);
+      renderStopsList(groupsArray);
+      setupInfiniteScroll();
+      setupStopClickHandlers(); // Re-attach after re-render!
+    }
+    
+    // Handle individual stop items
+    const stopItem = e.target.closest('.stop-item[data-stop-id]');
+    if (stopItem) {
+      e.preventDefault();
+      e.stopPropagation();
+      
+      const stopId = stopItem.getAttribute('data-stop-id');
+      const stop = state.gtfsData.stopsIndex[stopId];
+      
+      if (stop && window.stopsListMap) {
+        window.stopsListMap.setView(
+          [parseFloat(stop.stop_lat), parseFloat(stop.stop_lon)],
+          17
+        );
+      }
+      
+      if (stop) {
+        state.selectedStop = stop;
+        state.stopViewFilteredRoutes = [];
+        render();
+        await prepareStopDetailData(stop, state.selectedDate);
+        render();
+      }
+    }
+  };
+  
+  stopsListContainer._stopGroupHandler = groupHandler;
+  stopsListContainer.addEventListener('click', groupHandler);
+}
+
 async function renderStopsView() {
   if (!state.gtfsData || !state.showStopsView) return;
   
@@ -4868,6 +4986,9 @@ async function renderStopsView() {
     
     // Render list
     renderStopsList(groupsArray);
+    
+    // Setup click handlers for stop navigation
+    setupStopClickHandlers();
     
     // Setup infinite scroll observer (only once)
     setupInfiniteScroll();
@@ -6621,121 +6742,6 @@ case VIEW.LOADING:
         
         searchInput._searchHandler = newHandler;
         searchInput.addEventListener('input', newHandler);
-      }
-      
-      // Setup click handlers for stop groups and items (NEW)
-      const stopsListContainer = $('stops-list')?.parentElement;
-      if (stopsListContainer) {
-        // Remove old handler
-        if (stopsListContainer._stopGroupHandler) {
-          stopsListContainer.removeEventListener('click', stopsListContainer._stopGroupHandler);
-        }
-        
-        const groupHandler = async (e) => {
-          // Handle single-stop groups (direct navigation)
-          const singleStopGroup = e.target.closest('.stop-group[data-stop-id]');
-          if (singleStopGroup) {
-            e.preventDefault();
-            e.stopPropagation();
-            
-            const stopId = singleStopGroup.getAttribute('data-stop-id');
-            const stop = state.gtfsData.stopsIndex[stopId];
-            
-            if (stop && window.stopsListMap) {
-              window.stopsListMap.setView(
-                [parseFloat(stop.stop_lat), parseFloat(stop.stop_lon)],
-                17
-              );
-            }
-            
-            if (stop) {
-              state.selectedStop = stop;
-              state.stopViewFilteredRoutes = [];
-              render();
-              await prepareStopDetailData(stop, state.selectedDate);
-              render();
-            }
-            return;
-          }
-          
-          // Handle multi-stop groups (expand/collapse)
-          const multiStopGroup = e.target.closest('.stop-group[data-group-id]');
-          if (multiStopGroup) {
-            e.preventDefault();
-            e.stopPropagation();
-            
-            const groupId = multiStopGroup.getAttribute('data-group-id');
-            
-            // Zoom map to group
-            if (window.stopsListMap) {
-              const groupStops = state.stopsListData.filter(s => {
-                const baseName = s.stop_name.replace(/\s+\d+[A-Za-z]?$/, '').trim();
-                return baseName === groupId;
-              });
-              
-              if (groupStops.length > 0) {
-                const groupBounds = window.L.latLngBounds();
-                groupStops.forEach(stop => {
-                  if (stop.stop_lat && stop.stop_lon) {
-                    const lat = parseFloat(stop.stop_lat);
-                    const lon = parseFloat(stop.stop_lon);
-                    if (!isNaN(lat) && !isNaN(lon)) {
-                      groupBounds.extend([lat, lon]);
-                    }
-                  }
-                });
-                
-                if (groupBounds.isValid()) {
-                  window.stopsListMap.flyToBounds(groupBounds, { 
-                    padding: [50, 50], 
-                    maxZoom: 17,
-                    duration: 0.5
-                  });
-                }
-              }
-            }
-            
-            // Toggle expansion
-            if (state.expandedStopGroup === groupId) {
-              state.expandedStopGroup = null;
-            } else {
-              state.expandedStopGroup = groupId;
-            }
-            
-            // Re-render list (without reloading data)
-            const groupsArray = getOrBuildGroupsArray(state.stopsListData);
-            renderStopsList(groupsArray);
-            setupInfiniteScroll(); // Re-setup observer after re-render
-          }
-          
-          // Handle individual stop items
-          const stopItem = e.target.closest('.stop-item[data-stop-id]');
-          if (stopItem) {
-            e.preventDefault();
-            e.stopPropagation();
-            
-            const stopId = stopItem.getAttribute('data-stop-id');
-            const stop = state.gtfsData.stopsIndex[stopId];
-            
-            if (stop && window.stopsListMap) {
-              window.stopsListMap.setView(
-                [parseFloat(stop.stop_lat), parseFloat(stop.stop_lon)],
-                17
-              );
-            }
-            
-            if (stop) {
-              state.selectedStop = stop;
-              state.stopViewFilteredRoutes = [];
-              render();
-              await prepareStopDetailData(stop, state.selectedDate);
-              render();
-            }
-          }
-        };
-        
-        stopsListContainer._stopGroupHandler = groupHandler;
-        stopsListContainer.addEventListener('click', groupHandler);
       }
       
       $('back-button')?.addEventListener('click', () => {
