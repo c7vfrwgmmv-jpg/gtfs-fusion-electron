@@ -987,6 +987,8 @@ ipcMain.handle('query-departures-for-stop', async (event, { stopId, date }) => {
     let query;
     let params;
     
+    // Date parameter is optional - when provided, filters by active services on that date
+    // When not provided or no calendar tables exist, returns all departures
     if (date && (hasCalendar || hasCalendarDates)) {
       // Parse date for day of week
       const dateObj = new Date(
@@ -1010,7 +1012,7 @@ ipcMain.handle('query-departures-for-stop', async (event, { stopId, date }) => {
           SELECT 
             t.trip_id,
             st.departure_time,
-            st.arrival_time,
+            st.arrival_time,  -- Included for modal timetable display (both times needed for accurate schedules)
             t.trip_headsign,
             r.route_short_name,
             r.route_long_name,
