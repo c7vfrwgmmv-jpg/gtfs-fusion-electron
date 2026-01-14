@@ -273,6 +273,11 @@ worker.addEventListener('message', e => {
   }
 });
 
+// Helper to get the stopTimesIndex (for backward compatibility)
+function getStopTimesIndexOrCache() {
+  return state.gtfsData?.stopTimesIndex || {};
+}
+
 // ═══════════════════════════════════════════════════════════════
 // THROTTLED RENDERING (prevents UI thrashing)
 // ═══════════════════════════════════════════════════════════════
