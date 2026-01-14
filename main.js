@@ -791,6 +791,27 @@ ipcMain.handle('query-route-data-bulk', async (event, { routeId, date, direction
     `;
     
     console.log('[SQL] Executing bulk query with', params.length, 'params');
+    console.log('[SQL] Params:', params);
+    console.log('[SQL] Query preview:', query.substring(0, 500));
+    
+    // Debug: Check if active_services finds anything
+    const debugQuery = `
+      ${activeServicesCTE}
+      SELECT COUNT(*) as count FROM active_services
+    `;
+    const debugResult = await new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('Debug query timeout')), 10000);
+      conn.all(debugQuery, ...params.slice(0, params.length - 2), (err, rows) => {
+        clearTimeout(timeout);
+        if (err) {
+          console.error('[SQL] Debug query error:', err);
+          resolve([{ count: -1 }]);
+        } else {
+          resolve(rows);
+        }
+      });
+    });
+    console.log('[SQL] Active services count:', debugResult[0]?.count);
     
     const rows = await new Promise((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error('Query timeout')), 60000); // 60s for large routes
