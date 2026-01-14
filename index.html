@@ -1346,22 +1346,40 @@ Utils.TimeUtils = TimeUtils;
     }
 
 /**
- * Get simplified shape (lazy computation with cache)
- * Only simplifies shapes when they're actually needed for rendering
+ * Get simplified shape (lazy-loaded from DB via IPC with cache)
+ * Only loads and simplifies shapes when they're actually needed for rendering
  * @param {string} shapeId - Shape ID
  * @param {number} tolerance - Simplification tolerance (default 0.0001)
- * @returns {Array} - Simplified coordinates [[lat, lon], ...]
+ * @returns {Promise<Array>} - Simplified coordinates [[lat, lon], ...]
  */
-function getSimplifiedShape(shapeId, tolerance = 0.0001) {
+async function getSimplifiedShape(shapeId, tolerance = 0.0001) {
   const cacheKey = `${shapeId}_${tolerance}`;
   
-  // Check cache
+  // Check simplified cache first
   if (simplifiedShapesCache[cacheKey]) {
     return simplifiedShapesCache[cacheKey];
   }
   
-  // Get raw shape
-  const rawShape = state.gtfsData.shapesIndex?.[shapeId];
+  // Try to get raw shape from memory
+  let rawShape = state.gtfsData.shapesIndex?.[shapeId];
+  
+  // If not in memory, lazy-load from DB via IPC
+  if (!rawShape) {
+    try {
+      rawShape = await window.electronAPI.queryShape(shapeId);
+      
+      // Cache in memory for future use
+      if (!state.gtfsData.shapesIndex) {
+        state.gtfsData.shapesIndex = {};
+      }
+      state.gtfsData.shapesIndex[shapeId] = rawShape;
+      
+    } catch (err) {
+      console.warn('[Shapes] Failed to load shape:', shapeId, err);
+      return [];
+    }
+  }
+  
   if (!rawShape || rawShape.length === 0) {
     return [];
   }
@@ -1376,7 +1394,7 @@ function getSimplifiedShape(shapeId, tolerance = 0.0001) {
     simplified = rawShape;  // Don't simplify short shapes
   }
   
-  // Cache result
+  // Cache simplified result
   simplifiedShapesCache[cacheKey] = simplified;
   
   return simplified;
@@ -4396,14 +4414,18 @@ async function generateLineGeometry(stopDetails, routeType) {
 async function generateHybridLineGeometry(stops, shapeId, routeType) {
   if (!stops || stops.length < 2) return [];
   
-  const shapesIndex = state.gtfsData?.shapesIndex;
-  
-  // If no shapes.txt, use straight lines
-  if (!shapeId || !shapesIndex || !shapesIndex[shapeId]) {
+  // If no shapeId, use straight lines
+  if (!shapeId) {
     return await generateLineGeometry(stops, routeType);
   }
   
-  const shapePoints = getSimplifiedShape(shapeId);
+  // Try to load shape (lazy-loaded from DB if needed)
+  const shapePoints = await getSimplifiedShape(shapeId);
+  
+  // If shape couldn't be loaded or is empty, use straight lines
+  if (!shapePoints || shapePoints.length === 0) {
+    return await generateLineGeometry(stops, routeType);
+  }
   
   const coverage = Utils.calculateShapeCoverage(stops, shapePoints);
   
@@ -4487,15 +4509,22 @@ if (sel && Array.isArray(sel.stopDetails) && sel.stopDetails.length > 0) {
   let lineGeometry = null;
   
   // ===== HIERARCHY FOR ROUTE DRAWING =====
-  // 1. Try shapes.txt (best quality - from GTFS)
-  if (state.gtfsData. shapesIndex && Object.keys(state.gtfsData.shapesIndex).length > 0) {
-    const variantTrips = variantsData.trips.filter(t => variantsData.tripToVariant[t.trip_id] === variantId);
+  // 1. Try shapes.txt (best quality - from GTFS) - lazy-loaded from DB
+  const variantTrips = variantsData.trips.filter(t => variantsData.tripToVariant[t.trip_id] === variantId);
+  
+  if (variantTrips.length > 0) {
+    const shapeId = variantTrips[0].shape_id;
     
-    if (variantTrips. length > 0) {
-      const shapeId = variantTrips[0].shape_id;
-      
-      if (shapeId && state.gtfsData. shapesIndex[shapeId]) {
-        lineGeometry = getSimplifiedShape(shapeId);
+    if (shapeId) {
+      try {
+        lineGeometry = await getSimplifiedShape(shapeId);
+        // If empty array returned, reset to null for fallback
+        if (lineGeometry && lineGeometry.length === 0) {
+          lineGeometry = null;
+        }
+      } catch (err) {
+        console.warn('[Route Map] Failed to load shape, using fallback:', err);
+        lineGeometry = null;
       }
     }
   }
@@ -5739,8 +5768,8 @@ async function renderStopsView() {
         return;
       }
       
-      const groupsArray = getOrBuildGroupsArray(stopsData);
-      const group = groupsArray.find(g => g.id === groupId);
+      // Use cached groups array (stopsData is not in scope)
+      const group = cachedGroupsArray?.find(g => g.id === groupId);
       
       // Always zoom map to clicked group
       if (group && group.stops.length > 0 && window.stopsListMap) {
@@ -7696,8 +7725,17 @@ $('date-select-stop')?.addEventListener('change', async (e) => {
       if (mainRouteStops.length > 1) {
         let lineGeometry = null;
         
-        if (shapeId && state.gtfsData.shapesIndex && state.gtfsData.shapesIndex[shapeId]) {
-          lineGeometry = getSimplifiedShape(shapeId);
+        if (shapeId) {
+          try {
+            lineGeometry = await getSimplifiedShape(shapeId);
+            // If empty array returned, reset to null for fallback
+            if (lineGeometry && lineGeometry.length === 0) {
+              lineGeometry = null;
+            }
+          } catch (err) {
+            console.warn('[Stop Detail Map] Failed to load shape, using fallback:', err);
+            lineGeometry = null;
+          }
         }
         
         if (!lineGeometry) {
