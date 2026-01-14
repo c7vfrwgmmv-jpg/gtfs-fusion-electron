@@ -5106,11 +5106,8 @@ async function selectRoute(routeId, directionId) {
     
     console.log('📥 Received bulk data:', bulkData.length, 'trips');
     
-    // Parse embedded stop_times
-    state.currentTrips = bulkData.map(trip => {
-      // stop_times is already parsed from JSON in main process
-      return trip;
-    });
+    // Bulk data already has stop_times parsed from JSON in main process
+    state.currentTrips = bulkData;
     
     state.selectedRoute = (state.gtfsData.routes || []).find(r => r.route_id === routeId);
     state.selectedDirection = directionId || '0';
