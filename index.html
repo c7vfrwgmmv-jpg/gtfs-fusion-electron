@@ -7613,17 +7613,31 @@ $('direction-select')?.addEventListener('change', async (e) => {
       render(); // Show loading state
       
       try {
-        const trips = await window.electronAPI.queryTrips({
+        // Use bulk query for efficiency
+        const bulkData = await window.electronAPI.queryRouteBulk({
           routeId: state.selectedRoute.route_id,
           date: state.selectedDate,
           directionId: newDirection
         });
         
-        state.currentTrips = trips;
-        state.gtfsData.tripsIndex[state.selectedRoute.route_id] = trips;
+        state.currentTrips = bulkData;
+        state.gtfsData.tripsIndex[state.selectedRoute.route_id] = bulkData;
         
-        // Batch load stop times
-        await batchLoadStopTimes(trips.map(t => t.trip_id));
+        // Populate indexes from bulk data
+        bulkData.forEach(trip => {
+          state.gtfsData.stopTimesIndex[trip.trip_id] = trip.stop_times || [];
+          
+          (trip.stop_times || []).forEach(st => {
+            if (st.stop_id && !state.gtfsData.stopsIndex[st.stop_id]) {
+              state.gtfsData.stopsIndex[st.stop_id] = {
+                stop_id: st.stop_id,
+                stop_name: st.stop_name,
+                stop_lat: st.stop_lat,
+                stop_lon: st.stop_lon
+              };
+            }
+          });
+        });
         
         // Reload cached directions
         await getAvailableDirections();
