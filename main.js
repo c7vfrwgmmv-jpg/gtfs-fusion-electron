@@ -537,7 +537,7 @@ ipcMain.handle('query-trips', async (event, { routeId, date, directionId }) => {
     // ✅ JEDNO wywołanie conn.all z spread operatorem
     const rows = await new Promise((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error('Query timeout')), 30000);
-      conn.all(query, ...params, (err, rows) => {  // ✅ ... params (spread operator)
+      conn.all(query, ...params, (err, rows) => {
         clearTimeout(timeout);
         if (err) {
           console.error('❌ [SQL] Query error:', err);
@@ -608,14 +608,14 @@ ipcMain.handle('query-stop-times', async (event, tripId) => {
       SELECT ${selectClauses.join(', ')}
       FROM stop_times st
       JOIN stops s ON st.stop_id = s.stop_id
-      WHERE st.trip_id = ?
+      WHERE st.trip_id = $1
       ORDER BY CAST(st.stop_sequence AS INTEGER)
     `;
     
     // Execute query with timeout
     const rows = await new Promise((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error('Query timeout')), 10000);
-      conn.all(query, [tripId], (err, rows) => {
+      conn.all(query, tripId, (err, rows) => {
         clearTimeout(timeout);
         err ? reject(err) : resolve(rows);
       });
@@ -643,8 +643,8 @@ ipcMain.handle('query-shape', async (event, shapeId) => {
     const rows = await new Promise((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error('Query timeout')), 10000);
       conn.all(`
-        SELECT shape_pt_lat, shape_pt_lon FROM shapes WHERE shape_id = ? ORDER BY CAST(shape_pt_sequence AS INTEGER)
-      `, [shapeId], (err, rows) => {
+        SELECT shape_pt_lat, shape_pt_lon FROM shapes WHERE shape_id = $1 ORDER BY CAST(shape_pt_sequence AS INTEGER)
+      `, shapeId, (err, rows) => {
         clearTimeout(timeout);
         err ? reject(err) : resolve(rows);
       });
@@ -766,9 +766,9 @@ ipcMain.handle('query-route-data-bulk', async (event, { routeId, date, direction
               'departure_time', st.departure_time,
               'pickup_type', COALESCE(st.pickup_type, '0'),
               'drop_off_type', COALESCE(st.drop_off_type, '0'),
-              'stop_name', s.stop_name,
-              'stop_lat', s.stop_lat,
-              'stop_lon', s.stop_lon
+              'stop_name', st.stop_name,
+              'stop_lat', st.stop_lat,
+              'stop_lon', st.stop_lon
             )
           )
           FROM (
@@ -791,6 +791,27 @@ ipcMain.handle('query-route-data-bulk', async (event, { routeId, date, direction
     `;
     
     console.log('[SQL] Executing bulk query with', params.length, 'params');
+    console.log('[SQL] Params:', params);
+    console.log('[SQL] Query preview:', query.substring(0, 500));
+    
+    // Debug: Check if active_services finds anything
+    const debugQuery = `
+      ${activeServicesCTE}
+      SELECT COUNT(*) as count FROM active_services
+    `;
+    const debugResult = await new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('Debug query timeout')), 10000);
+      conn.all(debugQuery, ...params.slice(0, params.length - 2), (err, rows) => {
+        clearTimeout(timeout);
+        if (err) {
+          console.error('[SQL] Debug query error:', err);
+          resolve([{ count: -1 }]);
+        } else {
+          resolve(rows);
+        }
+      });
+    });
+    console.log('[SQL] Active services count:', debugResult[0]?.count);
     
     const rows = await new Promise((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error('Query timeout')), 60000); // 60s for large routes
@@ -861,82 +882,6 @@ ipcMain.handle('query-available-dates', async () => {
   } finally {
     conn.close();
     console.log('[SQL] query-available-dates connection closed');
-  }
-});
-
-// Query all stops from the database
-ipcMain.handle('query-all-stops', async () => {
-  if (!db) throw new Error('Database not loaded');
-  
-  const conn = db.connect();
-  
-  try {
-    console.log('[SQL] query-all-stops START');
-    
-    const rows = await new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        console.error('[SQL] query-all-stops TIMEOUT');
-        reject(new Error('Query timeout'));
-      }, 30000); // 30 second timeout for potentially large dataset
-      
-      conn.all(`SELECT * FROM stops`, (err, rows) => {
-        clearTimeout(timeout);
-        if (err) {
-          console.error('[SQL] query-all-stops ERROR:', err);
-          reject(err);
-        } else {
-          console.log('[SQL] query-all-stops SUCCESS:', rows.length, 'stops');
-          resolve(rows);
-        }
-      });
-    });
-    
-    return convertBigIntsToNumbers(rows || []);
-    
-  } catch (err) {
-    console.error('[SQL] query-all-stops FAILED:', err);
-    throw err;
-  } finally {
-    conn.close();
-    console.log('[SQL] query-all-stops connection closed');
-  }
-});
-
-// Query all trips from the database
-ipcMain.handle('query-all-trips', async () => {
-  if (!db) throw new Error('Database not loaded');
-  
-  const conn = db.connect();
-  
-  try {
-    console.log('[SQL] query-all-trips START');
-    
-    const rows = await new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        console.error('[SQL] query-all-trips TIMEOUT');
-        reject(new Error('Query timeout'));
-      }, 30000); // 30 second timeout for potentially large dataset
-      
-      conn.all(`SELECT * FROM trips`, (err, rows) => {
-        clearTimeout(timeout);
-        if (err) {
-          console.error('[SQL] query-all-trips ERROR:', err);
-          reject(err);
-        } else {
-          console.log('[SQL] query-all-trips SUCCESS:', rows.length, 'trips');
-          resolve(rows);
-        }
-      });
-    });
-    
-    return convertBigIntsToNumbers(rows || []);
-    
-  } catch (err) {
-    console.error('[SQL] query-all-trips FAILED:', err);
-    throw err;
-  } finally {
-    conn.close();
-    console.log('[SQL] query-all-trips connection closed');
   }
 });
 
@@ -1163,7 +1108,7 @@ ipcMain.handle('query-directions-for-route', async (event, routeIds) => {
     
     const rows = await new Promise((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error('Query timeout')), 30000);
-      conn.all(query, ...routeIdArray, (err, rows) => {
+      conn.all(query, routeIdArray, (err, rows) => {
         clearTimeout(timeout);
         if (err) {
           console.error('[SQL] query-directions-for-route ERROR:', err);
@@ -1478,7 +1423,7 @@ ipcMain.handle('query-stops-paginated', async (event, { searchQuery, offset, lim
           LEFT JOIN stop_times st ON s.stop_id = st.stop_id
           LEFT JOIN trips t ON st.trip_id = t.trip_id
           LEFT JOIN routes r ON t.route_id = r.route_id
-          WHERE s.stop_name ILIKE ?
+          WHERE s.stop_name ILIKE $1
         ),
         stop_routes AS (
           SELECT 
@@ -1502,10 +1447,10 @@ ipcMain.handle('query-stops-paginated', async (event, { searchQuery, offset, lim
             COUNT(dr.route_id) as route_count
           FROM stops s
           LEFT JOIN distinct_routes dr ON s.stop_id = dr.stop_id
-          WHERE s.stop_name ILIKE ?
+          WHERE s.stop_name ILIKE $2
           GROUP BY s.stop_id, s.stop_name, s.stop_lat, s.stop_lon, ${parentStationGroup}
           ORDER BY s.stop_name
-          LIMIT ? OFFSET ?
+          LIMIT $3 OFFSET $4
         )
         SELECT * FROM stop_routes
       `;
@@ -1550,7 +1495,7 @@ ipcMain.handle('query-stops-paginated', async (event, { searchQuery, offset, lim
           LEFT JOIN distinct_routes dr ON s.stop_id = dr.stop_id
           GROUP BY s.stop_id, s.stop_name, s.stop_lat, s.stop_lon, ${parentStationGroup}
           ORDER BY s.stop_name
-          LIMIT ? OFFSET ?
+          LIMIT $1 OFFSET $2
         )
         SELECT * FROM stop_routes
       `;
@@ -1615,7 +1560,7 @@ ipcMain.handle('query-stops-count', async (event, { searchQuery }) => {
       query = `
         SELECT COUNT(*) as count 
         FROM stops 
-        WHERE stop_name ILIKE ?
+        WHERE stop_name ILIKE $1
       `;
       params = [searchTerm];
     } else {
@@ -1626,14 +1571,22 @@ ipcMain.handle('query-stops-count', async (event, { searchQuery }) => {
     
     const result = await new Promise((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error('Query timeout')), 10000);
-      conn.all(query, ...params, (err, rows) => {
+      
+      const callback = (err, rows) => {
         clearTimeout(timeout);
         if (err) {
           reject(err);
         } else {
           resolve(rows && rows.length > 0 ? rows[0] : { count: 0 });
         }
-      });
+      };
+      
+      // Use spread operator only if params exist
+      if (params.length > 0) {
+        conn.all(query, ...params, callback);
+      } else {
+        conn.all(query, callback);
+      }
     });
     
     return Number(result.count || 0);

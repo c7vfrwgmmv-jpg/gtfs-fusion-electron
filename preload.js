@@ -25,12 +25,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Query stop_times for multiple trips in batch
   queryStopTimesBatch: (tripIds) => ipcRenderer.invoke('query-stop-times-batch', tripIds),
   
-  // Query all stops
-  queryAllStops: () => ipcRenderer.invoke('query-all-stops'),
-  
-  // Query all trips
-  queryAllTrips: () => ipcRenderer.invoke('query-all-trips'),
-  
   // Query shape data
   queryShape: (shapeId) => ipcRenderer.invoke('query-shape', shapeId),
   
