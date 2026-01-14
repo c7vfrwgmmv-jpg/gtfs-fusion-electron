@@ -1965,7 +1965,7 @@ ipcMain.handle('query-timetable-for-stop', async (event, { stopId, date, routeId
     
     // Get table availability
     const tables = await new Promise((resolve, reject) => {
-      conn.all(`SELECT table_name FROM information_schema.tables WHERE table_schema = 'main'`, 
+      conn.all(`SELECT name as table_name FROM sqlite_master WHERE type='table'`, 
         (err, rows) => {
           if (err) reject(err);
           else resolve(rows);
@@ -2411,8 +2411,14 @@ ipcMain.handle('query-timetable-for-stop', async (event, { stopId, date, routeId
                     const weekdayNumber = dayIndex + 1;
                     weekdayAnnotations.set(weekdaysKey, superscripts[weekdayNumber]);
                   } else {
-                    weekdayAnnotations.set(weekdaysKey, superscripts[nextSuperscript]);
-                    nextSuperscript++;
+                    // Bounds check for nextSuperscript
+                    if (nextSuperscript < superscripts.length) {
+                      weekdayAnnotations.set(weekdaysKey, superscripts[nextSuperscript]);
+                      nextSuperscript++;
+                    } else {
+                      // Fallback if too many patterns
+                      weekdayAnnotations.set(weekdaysKey, '*');
+                    }
                   }
                 }
                 weekdayAnnotation = weekdayAnnotations.get(weekdaysKey);
@@ -2433,8 +2439,9 @@ ipcMain.handle('query-timetable-for-stop', async (event, { stopId, date, routeId
       // Sort minutes
       Object.keys(hourGroups).forEach(hour => {
         hourGroups[hour].sort((a, b) => {
-          const minA = parseInt(a.replace(/[^0-9]/g, ''));
-          const minB = parseInt(b.replace(/[^0-9]/g, ''));
+          // Extract only the first 2 digits (minute portion) before any annotations
+          const minA = parseInt(a.substring(0, 2));
+          const minB = parseInt(b.substring(0, 2));
           return minA - minB;
         });
       });
