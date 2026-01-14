@@ -750,11 +750,15 @@ ipcMain.handle('query-route-data-bulk', async (event, { routeId, date, direction
               'stop_name', s.stop_name,
               'stop_lat', s.stop_lat,
               'stop_lon', s.stop_lon
-            ) ORDER BY CAST(st.stop_sequence AS INTEGER)
+            )
           )
-          FROM stop_times st
-          JOIN stops s ON st.stop_id = s.stop_id
-          WHERE st.trip_id = t.trip_id
+          FROM (
+            SELECT st.*, s.stop_name, s.stop_lat, s.stop_lon
+            FROM stop_times st
+            JOIN stops s ON st.stop_id = s.stop_id
+            WHERE st.trip_id = t.trip_id
+            ORDER BY CAST(st.stop_sequence AS INTEGER)
+          ) st
         ) as stop_times_json,
         (
           SELECT departure_time 
