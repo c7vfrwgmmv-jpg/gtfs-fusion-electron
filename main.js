@@ -780,20 +780,16 @@ ipcMain.handle('query-route-data-bulk', async (event, { routeId, date, direction
     
     console.log('[SQL] query-route-data-bulk SUCCESS:', rows.length, 'trips');
     
-    // Parse JSON for each trip
-    const result = rows.map(row => {
-      const stopTimes = row.stop_times_json ? JSON.parse(row.stop_times_json) : [];
-      
-      // Remove the JSON field and add parsed stop_times
+    // Parse JSON for each trip and replace with parsed stop_times array
+    const tripsWithParsedStopTimes = rows.map(row => {
       const { stop_times_json, ...tripData } = row;
-      
       return {
         ...tripData,
-        stop_times: stopTimes
+        stop_times: stop_times_json ? JSON.parse(stop_times_json) : []
       };
     });
     
-    return convertBigIntsToNumbers(result);
+    return convertBigIntsToNumbers(tripsWithParsedStopTimes);
     
   } catch (err) {
     console.error('[SQL] query-route-data-bulk FAILED:', err);
