@@ -1302,26 +1302,41 @@ ipcMain.handle('query-stops-paginated', async (event, { searchQuery, offset, lim
       const searchTerm = `%${searchQuery.trim()}%`;
       
       query = `
-        WITH stop_routes AS (
+        WITH distinct_routes AS (
+          SELECT DISTINCT
+            s.stop_id,
+            r.route_id,
+            r.route_short_name,
+            r.route_long_name,
+            r.route_type
+          FROM stops s
+          LEFT JOIN stop_times st ON s.stop_id = st.stop_id
+          LEFT JOIN trips t ON st.trip_id = t.trip_id
+          LEFT JOIN routes r ON t.route_id = r.route_id
+          WHERE s.stop_name ILIKE ? OR COALESCE(s.stop_desc, '') ILIKE ?
+        ),
+        stop_routes AS (
           SELECT 
             s.stop_id,
             s.stop_name,
             s.stop_lat,
             s.stop_lon,
             ${parentStationSelect}
-            JSON_GROUP_ARRAY(
-              DISTINCT JSON_OBJECT(
-                'route_id', r.route_id,
-                'route_short_name', r.route_short_name,
-                'route_long_name', r.route_long_name,
-                'route_type', r.route_type
-              )
-            ) FILTER (WHERE r.route_id IS NOT NULL) as routes_json,
-            COUNT(DISTINCT r.route_id) as route_count
+            LIST(
+              CASE 
+                WHEN dr.route_id IS NOT NULL 
+                THEN STRUCT_PACK(
+                  route_id := dr.route_id,
+                  route_short_name := dr.route_short_name,
+                  route_long_name := dr.route_long_name,
+                  route_type := dr.route_type
+                )
+                ELSE NULL
+              END
+            ) as routes_list,
+            COUNT(dr.route_id) as route_count
           FROM stops s
-          LEFT JOIN stop_times st ON s.stop_id = st.stop_id
-          LEFT JOIN trips t ON st.trip_id = t.trip_id
-          LEFT JOIN routes r ON t.route_id = r.route_id
+          LEFT JOIN distinct_routes dr ON s.stop_id = dr.stop_id
           WHERE s.stop_name ILIKE ? OR COALESCE(s.stop_desc, '') ILIKE ?
           GROUP BY s.stop_id, s.stop_name, s.stop_lat, s.stop_lon, ${parentStationGroup}
           ORDER BY s.stop_name
@@ -1329,31 +1344,45 @@ ipcMain.handle('query-stops-paginated', async (event, { searchQuery, offset, lim
         )
         SELECT * FROM stop_routes
       `;
-      params = [searchTerm, searchTerm, safeLimit, safeOffset];
+      params = [searchTerm, searchTerm, searchTerm, searchTerm, safeLimit, safeOffset];
       
     } else {
       // BROWSE MODE: Alphabetical pagination
       query = `
-        WITH stop_routes AS (
+        WITH distinct_routes AS (
+          SELECT DISTINCT
+            s.stop_id,
+            r.route_id,
+            r.route_short_name,
+            r.route_long_name,
+            r.route_type
+          FROM stops s
+          LEFT JOIN stop_times st ON s.stop_id = st.stop_id
+          LEFT JOIN trips t ON st.trip_id = t.trip_id
+          LEFT JOIN routes r ON t.route_id = r.route_id
+        ),
+        stop_routes AS (
           SELECT 
             s.stop_id,
             s.stop_name,
             s.stop_lat,
             s.stop_lon,
             ${parentStationSelect}
-            JSON_GROUP_ARRAY(
-              DISTINCT JSON_OBJECT(
-                'route_id', r.route_id,
-                'route_short_name', r.route_short_name,
-                'route_long_name', r.route_long_name,
-                'route_type', r.route_type
-              )
-            ) FILTER (WHERE r.route_id IS NOT NULL) as routes_json,
-            COUNT(DISTINCT r.route_id) as route_count
+            LIST(
+              CASE 
+                WHEN dr.route_id IS NOT NULL 
+                THEN STRUCT_PACK(
+                  route_id := dr.route_id,
+                  route_short_name := dr.route_short_name,
+                  route_long_name := dr.route_long_name,
+                  route_type := dr.route_type
+                )
+                ELSE NULL
+              END
+            ) as routes_list,
+            COUNT(dr.route_id) as route_count
           FROM stops s
-          LEFT JOIN stop_times st ON s.stop_id = st.stop_id
-          LEFT JOIN trips t ON st.trip_id = t.trip_id
-          LEFT JOIN routes r ON t.route_id = r.route_id
+          LEFT JOIN distinct_routes dr ON s.stop_id = dr.stop_id
           GROUP BY s.stop_id, s.stop_name, s.stop_lat, s.stop_lon, ${parentStationGroup}
           ORDER BY s.stop_name
           LIMIT ? OFFSET ?
@@ -1376,14 +1405,14 @@ ipcMain.handle('query-stops-paginated', async (event, { searchQuery, offset, lim
       });
     });
     
-    // Parse JSON in main process (faster than renderer)
+    // Parse results in main process
     const result = rows.map(row => {
       const stopData = {
         stop_id: row.stop_id,
         stop_name: row.stop_name,
         stop_lat: row.stop_lat,
         stop_lon: row.stop_lon,
-        routes: row.routes_json ? JSON.parse(row.routes_json) : [],
+        routes: row.routes_list ? row.routes_list.filter(r => r !== null) : [],
         routeCount: Number(row.route_count || 0)
       };
       
