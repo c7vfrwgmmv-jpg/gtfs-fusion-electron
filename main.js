@@ -2330,7 +2330,8 @@ ipcMain.handle('query-timetable-for-stop', async (event, { stopId, date, routeId
       // Add weekday annotations
       const weekdayAnnotations = new Map();
       let nextSuperscript = 1;
-        
+      
+      if (isWeekday) {
         const hourPatterns = new Map();
         Object.keys(hourGroups).forEach(hour => {
           hourPatterns.set(hour, new Map());
