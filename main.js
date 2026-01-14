@@ -1432,9 +1432,13 @@ ipcMain.handle('query-stops-count', async (event, { searchQuery }) => {
     
     const result = await new Promise((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error('Query timeout')), 10000);
-      conn.get(query, ...params, (err, row) => {
+      conn.all(query, ...params, (err, rows) => {
         clearTimeout(timeout);
-        err ? reject(err) : resolve(row);
+        if (err) {
+          reject(err);
+        } else {
+          resolve(rows && rows.length > 0 ? rows[0] : { count: 0 });
+        }
       });
     });
     
