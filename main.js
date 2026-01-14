@@ -706,8 +706,12 @@ ipcMain.handle('query-route-data-bulk', async (event, { routeId, date, direction
     
     // Get trips columns dynamically
     const tripsCols = await new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('Query timeout getting columns')), 10000);
       conn.all(`SELECT column_name FROM information_schema.columns WHERE table_name = 'trips'`, 
-        (err, rows) => err ? reject(err) : resolve(rows));
+        (err, rows) => {
+          clearTimeout(timeout);
+          err ? reject(err) : resolve(rows);
+        });
     });
     const tripsColSet = new Set(tripsCols.map(c => c.column_name.toLowerCase()));
     
