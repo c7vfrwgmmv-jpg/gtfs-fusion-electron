@@ -537,7 +537,7 @@ ipcMain.handle('query-trips', async (event, { routeId, date, directionId }) => {
     // ✅ JEDNO wywołanie conn.all z spread operatorem
     const rows = await new Promise((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error('Query timeout')), 30000);
-      conn.all(query, params, (err, rows) => {
+      conn.all(query, ...params, (err, rows) => {
         clearTimeout(timeout);
         if (err) {
           console.error('❌ [SQL] Query error:', err);
@@ -608,14 +608,14 @@ ipcMain.handle('query-stop-times', async (event, tripId) => {
       SELECT ${selectClauses.join(', ')}
       FROM stop_times st
       JOIN stops s ON st.stop_id = s.stop_id
-      WHERE st.trip_id = ?
+      WHERE st.trip_id = $1
       ORDER BY CAST(st.stop_sequence AS INTEGER)
     `;
     
     // Execute query with timeout
     const rows = await new Promise((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error('Query timeout')), 10000);
-      conn.all(query, [tripId], (err, rows) => {
+      conn.all(query, tripId, (err, rows) => {
         clearTimeout(timeout);
         err ? reject(err) : resolve(rows);
       });
@@ -643,8 +643,8 @@ ipcMain.handle('query-shape', async (event, shapeId) => {
     const rows = await new Promise((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error('Query timeout')), 10000);
       conn.all(`
-        SELECT shape_pt_lat, shape_pt_lon FROM shapes WHERE shape_id = ? ORDER BY CAST(shape_pt_sequence AS INTEGER)
-      `, [shapeId], (err, rows) => {
+        SELECT shape_pt_lat, shape_pt_lon FROM shapes WHERE shape_id = $1 ORDER BY CAST(shape_pt_sequence AS INTEGER)
+      `, shapeId, (err, rows) => {
         clearTimeout(timeout);
         err ? reject(err) : resolve(rows);
       });
@@ -794,7 +794,7 @@ ipcMain.handle('query-route-data-bulk', async (event, { routeId, date, direction
     
     const rows = await new Promise((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error('Query timeout')), 60000); // 60s for large routes
-      conn.all(query, params, (err, rows) => {
+      conn.all(query, ...params, (err, rows) => {
         clearTimeout(timeout);
         if (err) {
           console.error('[SQL] Bulk query error:', err);
@@ -987,7 +987,7 @@ ipcMain.handle('query-departures-for-stop', async (event, { stopId, date }) => {
     
     const rows = await new Promise((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error('Query timeout')), 30000);
-      conn.all(query, params, (err, rows) => {
+      conn.all(query, ...params, (err, rows) => {
         clearTimeout(timeout);
         if (err) {
           console.error('[SQL] query-departures-for-stop ERROR:', err);
@@ -1223,7 +1223,7 @@ ipcMain.handle('query-routes-at-stop', async (event, { stopId, date }) => {
     
     const rows = await new Promise((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error('Query timeout')), 30000);
-      conn.all(query, params, (err, rows) => {
+      conn.all(query, ...params, (err, rows) => {
         clearTimeout(timeout);
         if (err) {
           console.error('[SQL] query-routes-at-stop ERROR:', err);
@@ -1402,7 +1402,7 @@ ipcMain.handle('query-stops-paginated', async (event, { searchQuery, offset, lim
           LEFT JOIN stop_times st ON s.stop_id = st.stop_id
           LEFT JOIN trips t ON st.trip_id = t.trip_id
           LEFT JOIN routes r ON t.route_id = r.route_id
-          WHERE s.stop_name ILIKE ?
+          WHERE s.stop_name ILIKE $1
         ),
         stop_routes AS (
           SELECT 
@@ -1426,10 +1426,10 @@ ipcMain.handle('query-stops-paginated', async (event, { searchQuery, offset, lim
             COUNT(dr.route_id) as route_count
           FROM stops s
           LEFT JOIN distinct_routes dr ON s.stop_id = dr.stop_id
-          WHERE s.stop_name ILIKE ?
+          WHERE s.stop_name ILIKE $2
           GROUP BY s.stop_id, s.stop_name, s.stop_lat, s.stop_lon, ${parentStationGroup}
           ORDER BY s.stop_name
-          LIMIT ? OFFSET ?
+          LIMIT $3 OFFSET $4
         )
         SELECT * FROM stop_routes
       `;
@@ -1474,7 +1474,7 @@ ipcMain.handle('query-stops-paginated', async (event, { searchQuery, offset, lim
           LEFT JOIN distinct_routes dr ON s.stop_id = dr.stop_id
           GROUP BY s.stop_id, s.stop_name, s.stop_lat, s.stop_lon, ${parentStationGroup}
           ORDER BY s.stop_name
-          LIMIT ? OFFSET ?
+          LIMIT $1 OFFSET $2
         )
         SELECT * FROM stop_routes
       `;
@@ -1483,7 +1483,7 @@ ipcMain.handle('query-stops-paginated', async (event, { searchQuery, offset, lim
     
     const rows = await new Promise((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error('Query timeout')), 30000);
-      conn.all(query, params, (err, rows) => {
+      conn.all(query, ...params, (err, rows) => {
         clearTimeout(timeout);
         if (err) {
           console.error('[SQL] query-stops-paginated ERROR:', err);
@@ -1539,7 +1539,7 @@ ipcMain.handle('query-stops-count', async (event, { searchQuery }) => {
       query = `
         SELECT COUNT(*) as count 
         FROM stops 
-        WHERE stop_name ILIKE ?
+        WHERE stop_name ILIKE $1
       `;
       params = [searchTerm];
     } else {
@@ -1550,7 +1550,7 @@ ipcMain.handle('query-stops-count', async (event, { searchQuery }) => {
     
     const result = await new Promise((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error('Query timeout')), 10000);
-      conn.all(query, params, (err, rows) => {
+      conn.all(query, ...params, (err, rows) => {
         clearTimeout(timeout);
         if (err) {
           reject(err);
@@ -1692,7 +1692,7 @@ ipcMain.handle('prepare-stop-detail-data', async (event, { stopId, date }) => {
     
     const rows = await new Promise((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error('Query timeout')), 30000);
-      conn.all(query, params, (err, rows) => {
+      conn.all(query, ...params, (err, rows) => {
         clearTimeout(timeout);
         if (err) {
           console.error('[SQL] prepare-stop-detail-data ERROR:', err);
