@@ -16,6 +16,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Query trips for a route
   queryTrips: (params) => ipcRenderer.invoke('query-trips', params),
   
+  // Query route data in bulk (trips with embedded stop_times)
+  queryRouteBulk: (params) => ipcRenderer.invoke('query-route-data-bulk', params),
+  
   // Query stop_times for a single trip
   queryStopTimes: (tripId) => ipcRenderer.invoke('query-stop-times', tripId),
   
