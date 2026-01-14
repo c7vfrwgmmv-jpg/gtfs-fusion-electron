@@ -205,6 +205,22 @@ async function buildDatabaseFromZip(zipPath, dbPath, metaPath, hash, sendProgres
     }
     
     sendProgress('Building indexes...', 92);
+    
+    // Check if parent_station column exists before creating index
+    let hasParentStation = false;
+    try {
+      const columnCheck = await allAsync("PRAGMA table_info(stops)");
+      hasParentStation = columnCheck.some(col => col.name === 'parent_station');
+      console.log('[DB] parent_station column exists:', hasParentStation);
+    } catch (err) {
+      console.warn('[DB] Could not check for parent_station column:', err);
+    }
+    
+    // Create indexes conditionally
+    const parentStationIndex = hasParentStation 
+      ? 'CREATE INDEX IF NOT EXISTS idx_stops_parent ON stops(parent_station);' 
+      : '';
+    
     await execAsync(`
       CREATE INDEX IF NOT EXISTS idx_trips_route ON trips(route_id);
       CREATE INDEX IF NOT EXISTS idx_trips_service ON trips(service_id);
@@ -214,7 +230,7 @@ async function buildDatabaseFromZip(zipPath, dbPath, metaPath, hash, sendProgres
       CREATE INDEX IF NOT EXISTS idx_calendar_service ON calendar(service_id);
       CREATE INDEX IF NOT EXISTS idx_calendar_dates_date ON calendar_dates(date);
       CREATE INDEX IF NOT EXISTS idx_stops_name ON stops(stop_name);
-      CREATE INDEX IF NOT EXISTS idx_stops_parent ON stops(parent_station);
+      ${parentStationIndex}
     `);
     
     await execAsync('VACUUM');
@@ -1259,6 +1275,24 @@ ipcMain.handle('query-stops-paginated', async (event, { searchQuery, offset, lim
   try {
     console.log('[SQL] query-stops-paginated', { searchQuery, offset, limit });
     
+    // Check if parent_station column exists
+    let hasParentStation = false;
+    try {
+      const columnCheck = await new Promise((resolve, reject) => {
+        conn.all("PRAGMA table_info(stops)", (err, rows) => {
+          err ? reject(err) : resolve(rows);
+        });
+      });
+      hasParentStation = columnCheck.some(col => col.name === 'parent_station');
+      console.log('[SQL] parent_station column exists:', hasParentStation);
+    } catch (err) {
+      console.warn('[SQL] Could not check for parent_station column:', err);
+    }
+    
+    // Build query with conditional parent_station
+    const parentStationSelect = hasParentStation ? 's.parent_station,' : '';
+    const parentStationGroup = hasParentStation ? 's.parent_station, ' : '';
+    
     let query, params;
     const safeLimit = Math.min(Math.max(1, limit || 50), 200); // Cap at 200 for safety
     const safeOffset = Math.max(0, offset || 0);
@@ -1274,7 +1308,7 @@ ipcMain.handle('query-stops-paginated', async (event, { searchQuery, offset, lim
             s.stop_name,
             s.stop_lat,
             s.stop_lon,
-            s.parent_station,
+            ${parentStationSelect}
             JSON_GROUP_ARRAY(
               DISTINCT JSON_OBJECT(
                 'route_id', r.route_id,
@@ -1289,7 +1323,7 @@ ipcMain.handle('query-stops-paginated', async (event, { searchQuery, offset, lim
           LEFT JOIN trips t ON st.trip_id = t.trip_id
           LEFT JOIN routes r ON t.route_id = r.route_id
           WHERE s.stop_name ILIKE ? OR COALESCE(s.stop_desc, '') ILIKE ?
-          GROUP BY s.stop_id, s.stop_name, s.stop_lat, s.stop_lon, s.parent_station
+          GROUP BY s.stop_id, s.stop_name, s.stop_lat, s.stop_lon, ${parentStationGroup}
           ORDER BY s.stop_name
           LIMIT ? OFFSET ?
         )
@@ -1306,7 +1340,7 @@ ipcMain.handle('query-stops-paginated', async (event, { searchQuery, offset, lim
             s.stop_name,
             s.stop_lat,
             s.stop_lon,
-            s.parent_station,
+            ${parentStationSelect}
             JSON_GROUP_ARRAY(
               DISTINCT JSON_OBJECT(
                 'route_id', r.route_id,
@@ -1320,7 +1354,7 @@ ipcMain.handle('query-stops-paginated', async (event, { searchQuery, offset, lim
           LEFT JOIN stop_times st ON s.stop_id = st.stop_id
           LEFT JOIN trips t ON st.trip_id = t.trip_id
           LEFT JOIN routes r ON t.route_id = r.route_id
-          GROUP BY s.stop_id, s.stop_name, s.stop_lat, s.stop_lon, s.parent_station
+          GROUP BY s.stop_id, s.stop_name, s.stop_lat, s.stop_lon, ${parentStationGroup}
           ORDER BY s.stop_name
           LIMIT ? OFFSET ?
         )
@@ -1343,15 +1377,23 @@ ipcMain.handle('query-stops-paginated', async (event, { searchQuery, offset, lim
     });
     
     // Parse JSON in main process (faster than renderer)
-    const result = rows.map(row => ({
-      stop_id: row.stop_id,
-      stop_name: row.stop_name,
-      stop_lat: row.stop_lat,
-      stop_lon: row.stop_lon,
-      parent_station: row.parent_station,
-      routes: row.routes_json ? JSON.parse(row.routes_json) : [],
-      routeCount: Number(row.route_count || 0)
-    }));
+    const result = rows.map(row => {
+      const stopData = {
+        stop_id: row.stop_id,
+        stop_name: row.stop_name,
+        stop_lat: row.stop_lat,
+        stop_lon: row.stop_lon,
+        routes: row.routes_json ? JSON.parse(row.routes_json) : [],
+        routeCount: Number(row.route_count || 0)
+      };
+      
+      // Only add parent_station if it exists in the schema
+      if (hasParentStation) {
+        stopData.parent_station = row.parent_station;
+      }
+      
+      return stopData;
+    });
     
     console.log('[SQL] query-stops-paginated SUCCESS:', result.length, 'stops');
     return convertBigIntsToNumbers(result);
