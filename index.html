@@ -217,6 +217,10 @@ let state = {
   // Virtual scrolling state for large stop lists
   virtualListStartIndex: 0,
   virtualListItemHeight: 68, // px - height of stop-group element
+  
+  // Virtual scrolling state for large routes lists
+  routesListVirtualStart: 0,
+  routesListItemHeight: 120, // px - height of route-card button
 
   // Map layers for stop detail view
   stopDetailMapLayers: {},
@@ -3945,6 +3949,79 @@ function filterStopDetailMapLayers(filteredRouteIds = []) {
 const ROUTES_RENDER_BATCH_SIZE = 50; // Renderuj po 50 tras na raz
 const ROUTES_INITIAL_BATCH = 100; // Pierwsza partia - to co widać na ekranie
 
+// Virtual scrolling for large route lists
+function renderVirtualRoutesList(sortedGroups) {
+  const container = $('routes-tbody');
+  if (!container) return;
+  
+  const scrollContainer = $('routes-list-container');
+  if (!scrollContainer) return;
+  
+  const containerHeight = scrollContainer.clientHeight || 800;
+  const scrollTop = scrollContainer.scrollTop || 0;
+  const itemHeight = state.routesListItemHeight;
+  const itemsPerRow = 5; // routes-grid has 5 columns
+  
+  const rowHeight = itemHeight;
+  const totalRows = Math.ceil(sortedGroups.length / itemsPerRow);
+  
+  const bufferRows = 2;
+  const visibleRows = Math.ceil(containerHeight / rowHeight) + bufferRows * 2;
+  const startRow = Math.max(0, Math.floor(scrollTop / rowHeight) - bufferRows);
+  const endRow = Math.min(startRow + visibleRows, totalRows);
+  
+  const startIndex = startRow * itemsPerRow;
+  const endIndex = Math.min(endRow * itemsPerRow, sortedGroups.length);
+  
+  const visibleGroups = sortedGroups.slice(startIndex, endIndex);
+  const totalHeight = totalRows * rowHeight;
+  const offsetY = startRow * rowHeight;
+  
+  const grid = document.createElement('div');
+  grid.className = 'routes-grid';
+  grid.style.position = 'relative';
+  grid.style.height = `${totalHeight}px`;
+  
+  const innerGrid = document.createElement('div');
+  innerGrid.className = 'routes-grid';
+  innerGrid.style.position = 'absolute';
+  innerGrid.style.top = `${offsetY}px`;
+  innerGrid.style.left = '0';
+  innerGrid.style.right = '0';
+  
+  function reprOf(group) {
+    return (group && group.members && group.members[0]) || null;
+  }
+  
+  function labelOf(group) {
+    const r = reprOf(group);
+    if (!r) return group?.route_short_name || '';
+    return r.route_short_name || r.route_id || group.route_short_name || '';
+  }
+  
+  visibleGroups.forEach(group => {
+    const repr = reprOf(group);
+    if (!repr) return;
+    
+    const metaRt = getRouteTypeMeta(repr.route_type);
+    const btn = document.createElement('button');
+    btn.className = 'route-card';
+    btn.style.borderLeft = `6px solid ${metaRt.color || '#e6eefb'}`;
+    btn.innerHTML = `<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;">
+      <div style="font-weight:700;">${Utils.escapeHtml(labelOf(group))}</div>
+    </div>`;
+    btn.onclick = () => {
+      state.selectedRouteGroup = group;
+      selectRoute(repr.route_id, '0');
+    };
+    innerGrid.appendChild(btn);
+  });
+  
+  grid.appendChild(innerGrid);
+  container.innerHTML = '';
+  container.appendChild(grid);
+}
+
 // ✅ Zmień renderRouteTable() na asynchroniczną
 function renderRouteTable() {
   console.log('=== [ROUTE_TABLE] START ===');
@@ -4026,42 +4103,60 @@ console.log('[ROUTE_TABLE] logicalRoutes:', logicalRoutes);
   if (state.routeGroupMode === 'logical') {
     console.log('[ROUTE_TABLE] Mode: LOGICAL');
     
-    if (!logicalRoutes. length) {
-      console.warn('[ROUTE_TABLE] No logical routes to display! ');
+    if (!logicalRoutes.length) {
+      console.warn('[ROUTE_TABLE] No logical routes to display!');
       return;
     }
 
-    const grid = document.createElement('div');
-    grid.className = 'routes-grid';
-
-    console.log('[ROUTE_TABLE] Sorting', logicalRoutes.length, 'logical routes.. .');
+    console.log('[ROUTE_TABLE] Sorting', logicalRoutes.length, 'logical routes...');
     
-    sortGroupsByRouteId(logicalRoutes).forEach(group => {
-      const repr = reprOf(group);
-      if (!repr) return;
+    const sorted = sortGroupsByRouteId(logicalRoutes);
+    
+    // Use virtual scrolling for large lists (>100 routes)
+    if (sorted.length > 100) {
+      console.log('[ROUTE_TABLE] Using virtual scrolling for', sorted.length, 'routes');
+      renderVirtualRoutesList(sorted);
       
-      const metaRt = getRouteTypeMeta(repr. route_type);
-      const btn = document.createElement('button');
-      btn.className = 'route-card';
-      btn.style.borderLeft = `6px solid ${metaRt.color || '#e6eefb'}`;
+      // Attach scroll listener
+      const scrollContainer = $('routes-list-container');
+      if (scrollContainer && !scrollContainer._routesScrollListener) {
+        scrollContainer._routesScrollListener = () => renderVirtualRoutesList(sorted);
+        scrollContainer.addEventListener('scroll', scrollContainer._routesScrollListener);
+      }
+    } else {
+      // Regular rendering for small lists
+      console.log('[ROUTE_TABLE] Regular rendering for', sorted.length, 'routes');
+      const grid = document.createElement('div');
+      grid.className = 'routes-grid';
+      
+      sorted.forEach(group => {
+        const repr = reprOf(group);
+        if (!repr) return;
+        
+        const metaRt = getRouteTypeMeta(repr.route_type);
+        const btn = document.createElement('button');
+        btn.className = 'route-card';
+        btn.style.borderLeft = `6px solid ${metaRt.color || '#e6eefb'}`;
 
-      const label = labelOf(group);
+        const label = labelOf(group);
 
-      btn.innerHTML = `
-        <div style="display: flex;flex-direction:column;align-items:center;justify-content:center;">
-          <div style="font-weight:700;">${Utils.escapeHtml(label)}</div>
-        </div>
-      `;
+        btn.innerHTML = `
+          <div style="display: flex;flex-direction:column;align-items:center;justify-content:center;">
+            <div style="font-weight:700;">${Utils.escapeHtml(label)}</div>
+          </div>
+        `;
 
-      btn.onclick = () => {
-        state.selectedRouteGroup = group;
-        selectRoute(repr.route_id, '0');
-      };
+        btn.onclick = () => {
+          state.selectedRouteGroup = group;
+          selectRoute(repr.route_id, '0');
+        };
 
-      grid.appendChild(btn);
-    });
-
-    container.appendChild(grid);
+        grid.appendChild(btn);
+      });
+      
+      container.appendChild(grid);
+    }
+    
     console.log('[ROUTE_TABLE] LOGICAL rendering complete');
     return;
   }
