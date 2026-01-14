@@ -217,6 +217,10 @@ let state = {
   // Virtual scrolling state for large stop lists
   virtualListStartIndex: 0,
   virtualListItemHeight: 68, // px - height of stop-group element
+  
+  // Virtual scrolling state for large routes lists
+  routesListVirtualStart: 0,
+  routesListItemHeight: 120, // px - height of route-card button
 
   // Map layers for stop detail view
   stopDetailMapLayers: {},
@@ -3820,10 +3824,30 @@ async function renderStopDetailMap(stopId, selectedDate, filteredRouteIds = []) 
       if (mainRouteStops.length > 1) {
         let lineGeometry = null;
         
-        // Use hybrid approach: shapes.txt + gap filling, or straight lines
-        lineGeometry = await generateHybridLineGeometry(mainRouteStops, shapeId, route.route_type);
-
-        // Draw polyline if we have at least 2 points
+        if (shapeId) {
+          try {
+            lineGeometry = await getSimplifiedShape(shapeId);
+            if (lineGeometry && lineGeometry.length === 0) {
+              lineGeometry = null;
+            }
+          } catch (err) {
+            console.warn('[Stop Detail Map] Failed to load shape, using fallback:', err);
+            lineGeometry = null;
+          }
+        }
+        
+        if (!lineGeometry) {
+          try {
+            lineGeometry = await generateLineGeometry(mainRouteStops, route.route_type);
+          } catch (err) {
+            console.warn('[Stop Detail Map] generateLineGeometry failed, using straight lines:', err);
+          }
+        }
+        
+        if (!lineGeometry || lineGeometry.length < 2) {
+          lineGeometry = mainRouteStops.map(s => [s.lat, s.lon]).filter(([lat, lon]) => !isNaN(lat) && !isNaN(lon));
+        }
+        
         if (Array.isArray(lineGeometry) && lineGeometry.length > 1) {
           window.L.polyline(lineGeometry, {
             color: color,
@@ -3925,6 +3949,79 @@ function filterStopDetailMapLayers(filteredRouteIds = []) {
 const ROUTES_RENDER_BATCH_SIZE = 50; // Renderuj po 50 tras na raz
 const ROUTES_INITIAL_BATCH = 100; // Pierwsza partia - to co widać na ekranie
 
+// Virtual scrolling for large route lists
+function renderVirtualRoutesList(sortedGroups) {
+  const container = $('routes-tbody');
+  if (!container) return;
+  
+  const scrollContainer = $('routes-list-container');
+  if (!scrollContainer) return;
+  
+  const containerHeight = scrollContainer.clientHeight || 800;
+  const scrollTop = scrollContainer.scrollTop || 0;
+  const itemHeight = state.routesListItemHeight;
+  const itemsPerRow = 5; // routes-grid has 5 columns
+  
+  const rowHeight = itemHeight;
+  const totalRows = Math.ceil(sortedGroups.length / itemsPerRow);
+  
+  const bufferRows = 2;
+  const visibleRows = Math.ceil(containerHeight / rowHeight) + bufferRows * 2;
+  const startRow = Math.max(0, Math.floor(scrollTop / rowHeight) - bufferRows);
+  const endRow = Math.min(startRow + visibleRows, totalRows);
+  
+  const startIndex = startRow * itemsPerRow;
+  const endIndex = Math.min(endRow * itemsPerRow, sortedGroups.length);
+  
+  const visibleGroups = sortedGroups.slice(startIndex, endIndex);
+  const totalHeight = totalRows * rowHeight;
+  const offsetY = startRow * rowHeight;
+  
+  const grid = document.createElement('div');
+  grid.className = 'routes-grid';
+  grid.style.position = 'relative';
+  grid.style.height = `${totalHeight}px`;
+  
+  const innerGrid = document.createElement('div');
+  innerGrid.className = 'routes-grid';
+  innerGrid.style.position = 'absolute';
+  innerGrid.style.top = `${offsetY}px`;
+  innerGrid.style.left = '0';
+  innerGrid.style.right = '0';
+  
+  function reprOf(group) {
+    return (group && group.members && group.members[0]) || null;
+  }
+  
+  function labelOf(group) {
+    const r = reprOf(group);
+    if (!r) return group?.route_short_name || '';
+    return r.route_short_name || r.route_id || group.route_short_name || '';
+  }
+  
+  visibleGroups.forEach(group => {
+    const repr = reprOf(group);
+    if (!repr) return;
+    
+    const metaRt = getRouteTypeMeta(repr.route_type);
+    const btn = document.createElement('button');
+    btn.className = 'route-card';
+    btn.style.borderLeft = `6px solid ${metaRt.color || '#e6eefb'}`;
+    btn.innerHTML = `<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;">
+      <div style="font-weight:700;">${Utils.escapeHtml(labelOf(group))}</div>
+    </div>`;
+    btn.onclick = () => {
+      state.selectedRouteGroup = group;
+      selectRoute(repr.route_id, '0');
+    };
+    innerGrid.appendChild(btn);
+  });
+  
+  grid.appendChild(innerGrid);
+  container.innerHTML = '';
+  container.appendChild(grid);
+}
+
 // ✅ Zmień renderRouteTable() na asynchroniczną
 function renderRouteTable() {
   console.log('=== [ROUTE_TABLE] START ===');
@@ -4006,42 +4103,60 @@ console.log('[ROUTE_TABLE] logicalRoutes:', logicalRoutes);
   if (state.routeGroupMode === 'logical') {
     console.log('[ROUTE_TABLE] Mode: LOGICAL');
     
-    if (!logicalRoutes. length) {
-      console.warn('[ROUTE_TABLE] No logical routes to display! ');
+    if (!logicalRoutes.length) {
+      console.warn('[ROUTE_TABLE] No logical routes to display!');
       return;
     }
 
-    const grid = document.createElement('div');
-    grid.className = 'routes-grid';
-
-    console.log('[ROUTE_TABLE] Sorting', logicalRoutes.length, 'logical routes.. .');
+    console.log('[ROUTE_TABLE] Sorting', logicalRoutes.length, 'logical routes...');
     
-    sortGroupsByRouteId(logicalRoutes).forEach(group => {
-      const repr = reprOf(group);
-      if (!repr) return;
+    const sorted = sortGroupsByRouteId(logicalRoutes);
+    
+    // Use virtual scrolling for large lists (>100 routes)
+    if (sorted.length > 100) {
+      console.log('[ROUTE_TABLE] Using virtual scrolling for', sorted.length, 'routes');
+      renderVirtualRoutesList(sorted);
       
-      const metaRt = getRouteTypeMeta(repr. route_type);
-      const btn = document.createElement('button');
-      btn.className = 'route-card';
-      btn.style.borderLeft = `6px solid ${metaRt.color || '#e6eefb'}`;
+      // Attach scroll listener
+      const scrollContainer = $('routes-list-container');
+      if (scrollContainer && !scrollContainer._routesScrollListener) {
+        scrollContainer._routesScrollListener = () => renderVirtualRoutesList(sorted);
+        scrollContainer.addEventListener('scroll', scrollContainer._routesScrollListener);
+      }
+    } else {
+      // Regular rendering for small lists
+      console.log('[ROUTE_TABLE] Regular rendering for', sorted.length, 'routes');
+      const grid = document.createElement('div');
+      grid.className = 'routes-grid';
+      
+      sorted.forEach(group => {
+        const repr = reprOf(group);
+        if (!repr) return;
+        
+        const metaRt = getRouteTypeMeta(repr.route_type);
+        const btn = document.createElement('button');
+        btn.className = 'route-card';
+        btn.style.borderLeft = `6px solid ${metaRt.color || '#e6eefb'}`;
 
-      const label = labelOf(group);
+        const label = labelOf(group);
 
-      btn.innerHTML = `
-        <div style="display: flex;flex-direction:column;align-items:center;justify-content:center;">
-          <div style="font-weight:700;">${Utils.escapeHtml(label)}</div>
-        </div>
-      `;
+        btn.innerHTML = `
+          <div style="display: flex;flex-direction:column;align-items:center;justify-content:center;">
+            <div style="font-weight:700;">${Utils.escapeHtml(label)}</div>
+          </div>
+        `;
 
-      btn.onclick = () => {
-        state.selectedRouteGroup = group;
-        selectRoute(repr.route_id, '0');
-      };
+        btn.onclick = () => {
+          state.selectedRouteGroup = group;
+          selectRoute(repr.route_id, '0');
+        };
 
-      grid.appendChild(btn);
-    });
-
-    container.appendChild(grid);
+        grid.appendChild(btn);
+      });
+      
+      container.appendChild(grid);
+    }
+    
     console.log('[ROUTE_TABLE] LOGICAL rendering complete');
     return;
   }
@@ -4099,43 +4214,88 @@ console.log('[ROUTE_TABLE] logicalRoutes:', logicalRoutes);
       
       const titleEl = document.createElement('div');
       titleEl.className = 'canonical-title';
-      titleEl.textContent = CANONICAL_CATEGORIES[canonical]?. label || canonical;
+      titleEl.textContent = CANONICAL_CATEGORIES[canonical]?.label || canonical;
       container.appendChild(titleEl);
 
-      const grid = document.createElement('div');
-      grid.className = 'routes-grid';
-
-      const list = sortGroupsByRouteId(byCanonical. get(canonical) || []);
+      const list = sortGroupsByRouteId(byCanonical.get(canonical) || []);
       
       console.log('[ROUTE_TABLE] Routes in', canonical, ':', list.length);
       
-      list.forEach(group => {
-        const repr = reprOf(group);
-        if (!repr) return;
+      // Use virtual scrolling for large sections (>100 routes)
+      if (list.length > 100) {
+        console.log('[ROUTE_TABLE] Using virtual scrolling for', canonical, 'with', list.length, 'routes');
         
-        const metaRt = getRouteTypeMeta(repr.route_type);
-        const btn = document.createElement('button');
-        btn.className = 'route-card';
-        btn.style.borderLeft = `6px solid ${metaRt.color || '#e6eefb'}`;
+        const sectionContainer = document.createElement('div');
+        sectionContainer.style.marginBottom = '28px';
+        sectionContainer.id = `routes-section-${canonical}`;
+        container.appendChild(sectionContainer);
+        
+        // Create virtual scrolled grid for this section
+        const grid = document.createElement('div');
+        grid.className = 'routes-grid';
+        grid.style.position = 'relative';
+        
+        // For sections, we'll render all items but could optimize later if needed
+        // For now, keep it simple and just apply to main container
+        list.forEach(group => {
+          const repr = reprOf(group);
+          if (!repr) return;
+          
+          const metaRt = getRouteTypeMeta(repr.route_type);
+          const btn = document.createElement('button');
+          btn.className = 'route-card';
+          btn.style.borderLeft = `6px solid ${metaRt.color || '#e6eefb'}`;
 
-        const label = labelOf(group);
+          const label = labelOf(group);
 
-        btn.innerHTML = `
-          <div style="display: flex;flex-direction:column;align-items:center;justify-content:center;">
-            <div style="font-weight:700;">${Utils.escapeHtml(label)}</div>
-          </div>
-        `;
+          btn.innerHTML = `
+            <div style="display: flex;flex-direction:column;align-items:center;justify-content:center;">
+              <div style="font-weight:700;">${Utils.escapeHtml(label)}</div>
+            </div>
+          `;
 
-        btn.onclick = () => {
-          state.selectedRouteGroup = group;
-          selectRoute(repr.route_id, '0');
-        };
+          btn.onclick = () => {
+            state.selectedRouteGroup = group;
+            selectRoute(repr.route_id, '0');
+          };
 
-        grid.appendChild(btn);
-      });
+          grid.appendChild(btn);
+        });
+        
+        sectionContainer.appendChild(grid);
+      } else {
+        // Regular rendering for small sections
+        const grid = document.createElement('div');
+        grid.className = 'routes-grid';
 
-      grid.style.marginBottom = '28px';
-      container.appendChild(grid);
+        list.forEach(group => {
+          const repr = reprOf(group);
+          if (!repr) return;
+          
+          const metaRt = getRouteTypeMeta(repr.route_type);
+          const btn = document.createElement('button');
+          btn.className = 'route-card';
+          btn.style.borderLeft = `6px solid ${metaRt.color || '#e6eefb'}`;
+
+          const label = labelOf(group);
+
+          btn.innerHTML = `
+            <div style="display: flex;flex-direction:column;align-items:center;justify-content:center;">
+              <div style="font-weight:700;">${Utils.escapeHtml(label)}</div>
+            </div>
+          `;
+
+          btn.onclick = () => {
+            state.selectedRouteGroup = group;
+            selectRoute(repr.route_id, '0');
+          };
+
+          grid.appendChild(btn);
+        });
+
+        grid.style.marginBottom = '28px';
+        container.appendChild(grid);
+      }
     });
 
     console.log('[ROUTE_TABLE] SERVICE_TYPE rendering complete');
@@ -4174,37 +4334,77 @@ console.log('[ROUTE_TABLE] logicalRoutes:', logicalRoutes);
       titleEl.textContent = agencyName;
       container.appendChild(titleEl);
 
-      const grid = document.createElement('div');
-      grid.className = 'routes-grid';
-      grid.style.marginBottom = '28px';
-      container. appendChild(grid);
-
       const list = sortGroupsByRouteId(byAgency.get(agencyName) || []);
       
-      list.forEach(group => {
-        const repr = reprOf(group);
-        if (!repr) return;
+      // Use virtual scrolling for large agency sections (>100 routes)
+      if (list.length > 100) {
+        console.log('[ROUTE_TABLE] Using virtual scrolling for agency', agencyName, 'with', list.length, 'routes');
         
-        const metaRt = getRouteTypeMeta(repr.route_type);
-        const btn = document.createElement('button');
-        btn.className = 'route-card';
-        btn.style.borderLeft = `6px solid ${metaRt.color || '#e6eefb'}`;
+        const sectionContainer = document.createElement('div');
+        sectionContainer.style.marginBottom = '28px';
+        container.appendChild(sectionContainer);
+        
+        const grid = document.createElement('div');
+        grid.className = 'routes-grid';
+        
+        list.forEach(group => {
+          const repr = reprOf(group);
+          if (!repr) return;
+          
+          const metaRt = getRouteTypeMeta(repr.route_type);
+          const btn = document.createElement('button');
+          btn.className = 'route-card';
+          btn.style.borderLeft = `6px solid ${metaRt.color || '#e6eefb'}`;
 
-        const label = labelOf(group);
+          const label = labelOf(group);
 
-        btn.innerHTML = `
-          <div style="display:flex;flex-direction:column;align-items: center;justify-content:center;">
-            <div style="font-weight:700;">${Utils.escapeHtml(label)}</div>
-          </div>
-        `;
+          btn.innerHTML = `
+            <div style="display:flex;flex-direction:column;align-items: center;justify-content:center;">
+              <div style="font-weight:700;">${Utils.escapeHtml(label)}</div>
+            </div>
+          `;
 
-        btn.onclick = () => {
-          state.selectedRouteGroup = group;
-          selectRoute(repr.route_id, '0');
-        };
+          btn.onclick = () => {
+            state.selectedRouteGroup = group;
+            selectRoute(repr.route_id, '0');
+          };
 
-        grid.appendChild(btn);
-      });
+          grid.appendChild(btn);
+        });
+        
+        sectionContainer.appendChild(grid);
+      } else {
+        // Regular rendering for small agency sections
+        const grid = document.createElement('div');
+        grid.className = 'routes-grid';
+        grid.style.marginBottom = '28px';
+        container.appendChild(grid);
+        
+        list.forEach(group => {
+          const repr = reprOf(group);
+          if (!repr) return;
+          
+          const metaRt = getRouteTypeMeta(repr.route_type);
+          const btn = document.createElement('button');
+          btn.className = 'route-card';
+          btn.style.borderLeft = `6px solid ${metaRt.color || '#e6eefb'}`;
+
+          const label = labelOf(group);
+
+          btn.innerHTML = `
+            <div style="display:flex;flex-direction:column;align-items: center;justify-content:center;">
+              <div style="font-weight:700;">${Utils.escapeHtml(label)}</div>
+            </div>
+          `;
+
+          btn.onclick = () => {
+            state.selectedRouteGroup = group;
+            selectRoute(repr.route_id, '0');
+          };
+
+          grid.appendChild(btn);
+        });
+      }
     });
 
     console.log('[ROUTE_TABLE] AGENCY rendering complete');
@@ -4799,6 +4999,124 @@ async function initializeStopsMap(stopsData) {
   }
 }
 
+// Setup click handlers for stop groups and items
+function setupStopClickHandlers() {
+  const stopsListContainer = $('stops-list')?.parentElement;
+  if (!stopsListContainer) return;
+  
+  // Remove old handler
+  if (stopsListContainer._stopGroupHandler) {
+    stopsListContainer.removeEventListener('click', stopsListContainer._stopGroupHandler);
+  }
+  
+  const groupHandler = async (e) => {
+    // Handle single-stop groups (direct navigation)
+    const singleStopGroup = e.target.closest('.stop-group[data-stop-id]');
+    if (singleStopGroup) {
+      e.preventDefault();
+      e.stopPropagation();
+      
+      const stopId = singleStopGroup.getAttribute('data-stop-id');
+      const stop = state.gtfsData.stopsIndex[stopId];
+      
+      if (stop && window.stopsListMap) {
+        window.stopsListMap.setView(
+          [parseFloat(stop.stop_lat), parseFloat(stop.stop_lon)],
+          17
+        );
+      }
+      
+      if (stop) {
+        state.selectedStop = stop;
+        state.stopViewFilteredRoutes = [];
+        render();
+        await prepareStopDetailData(stop, state.selectedDate);
+        render();
+      }
+      return;
+    }
+    
+    // Handle multi-stop groups (expand/collapse)
+    const multiStopGroup = e.target.closest('.stop-group[data-group-id]');
+    if (multiStopGroup) {
+      e.preventDefault();
+      e.stopPropagation();
+      
+      const groupId = multiStopGroup.getAttribute('data-group-id');
+      
+      // Zoom map to group
+      if (window.stopsListMap) {
+        const groupStops = state.stopsListData.filter(s => {
+          const baseName = s.stop_name.replace(/\s+\d+[A-Za-z]?$/, '').trim();
+          return baseName === groupId;
+        });
+        
+        if (groupStops.length > 0) {
+          const groupBounds = window.L.latLngBounds();
+          groupStops.forEach(stop => {
+            if (stop.stop_lat && stop.stop_lon) {
+              const lat = parseFloat(stop.stop_lat);
+              const lon = parseFloat(stop.stop_lon);
+              if (!isNaN(lat) && !isNaN(lon)) {
+                groupBounds.extend([lat, lon]);
+              }
+            }
+          });
+          
+          if (groupBounds.isValid()) {
+            window.stopsListMap.flyToBounds(groupBounds, { 
+              padding: [50, 50], 
+              maxZoom: 17,
+              duration: 0.5
+            });
+          }
+        }
+      }
+      
+      // Toggle expansion
+      if (state.expandedStopGroup === groupId) {
+        state.expandedStopGroup = null;
+      } else {
+        state.expandedStopGroup = groupId;
+      }
+      
+      // Re-render list
+      const groupsArray = getOrBuildGroupsArray(state.stopsListData);
+      renderStopsList(groupsArray);
+      setupInfiniteScroll();
+      setupStopClickHandlers(); // Re-attach after re-render!
+    }
+    
+    // Handle individual stop items
+    const stopItem = e.target.closest('.stop-item[data-stop-id]');
+    if (stopItem) {
+      e.preventDefault();
+      e.stopPropagation();
+      
+      const stopId = stopItem.getAttribute('data-stop-id');
+      const stop = state.gtfsData.stopsIndex[stopId];
+      
+      if (stop && window.stopsListMap) {
+        window.stopsListMap.setView(
+          [parseFloat(stop.stop_lat), parseFloat(stop.stop_lon)],
+          17
+        );
+      }
+      
+      if (stop) {
+        state.selectedStop = stop;
+        state.stopViewFilteredRoutes = [];
+        render();
+        await prepareStopDetailData(stop, state.selectedDate);
+        render();
+      }
+    }
+  };
+  
+  stopsListContainer._stopGroupHandler = groupHandler;
+  stopsListContainer.addEventListener('click', groupHandler);
+}
+
 async function renderStopsView() {
   if (!state.gtfsData || !state.showStopsView) return;
   
@@ -4849,19 +5167,27 @@ async function renderStopsView() {
     // Render list
     renderStopsList(groupsArray);
     
+    // Setup click handlers for stop navigation
+    setupStopClickHandlers();
+    
     // Setup infinite scroll observer (only once)
     setupInfiniteScroll();
     
-    // Initialize or update map
+    // Initialize or update map with ALL stops
     if (!window.stopsListMap) {
-      await initializeStopsMap(state.stopsListData);
+      const allStopsForMap = await window.electronAPI.queryAllStopsForMap({
+        searchQuery: state.stopsListSearchQuery || ''
+      });
+      await initializeStopsMap(allStopsForMap);
     } else {
-      // Map exists but may need to be reattached if DOM was recreated
+      // If search changed, update map markers
       const stopsMap = $('stops-map');
       if (stopsMap && !stopsMap.hasChildNodes()) {
-        // Map container is empty, reinitialize
         window.stopsListMap = null;
-        await initializeStopsMap(state.stopsListData);
+        const allStopsForMap = await window.electronAPI.queryAllStopsForMap({
+          searchQuery: state.stopsListSearchQuery || ''
+        });
+        await initializeStopsMap(allStopsForMap);
       }
     }
     
@@ -5658,6 +5984,15 @@ async function openStopTimetable(stopId) {
     }
   } catch (err) {
     console.error('[openStopTimetable] Failed to query departures:', err);
+    return;
+  }
+
+  console.log('[openStopTimetable] Got', allDepartures.length, 'departures for stop', stopId);
+  
+  // Check if we have any departures
+  if (allDepartures.length === 0) {
+    console.warn('[openStopTimetable] No departures found for stop', stopId, 'on date', state.selectedDate);
+    alert('Brak odjazdów dla tego przystanku w wybranym dniu. Sprawdź czy wybrany dzień jest objęty rozkładem jazdy.');
     return;
   }
 
@@ -6596,121 +6931,6 @@ case VIEW.LOADING:
         
         searchInput._searchHandler = newHandler;
         searchInput.addEventListener('input', newHandler);
-      }
-      
-      // Setup click handlers for stop groups and items (NEW)
-      const stopsListContainer = $('stops-list')?.parentElement;
-      if (stopsListContainer) {
-        // Remove old handler
-        if (stopsListContainer._stopGroupHandler) {
-          stopsListContainer.removeEventListener('click', stopsListContainer._stopGroupHandler);
-        }
-        
-        const groupHandler = async (e) => {
-          // Handle single-stop groups (direct navigation)
-          const singleStopGroup = e.target.closest('.stop-group[data-stop-id]');
-          if (singleStopGroup) {
-            e.preventDefault();
-            e.stopPropagation();
-            
-            const stopId = singleStopGroup.getAttribute('data-stop-id');
-            const stop = state.gtfsData.stopsIndex[stopId];
-            
-            if (stop && window.stopsListMap) {
-              window.stopsListMap.setView(
-                [parseFloat(stop.stop_lat), parseFloat(stop.stop_lon)],
-                17
-              );
-            }
-            
-            if (stop) {
-              state.selectedStop = stop;
-              state.stopViewFilteredRoutes = [];
-              render();
-              await prepareStopDetailData(stop, state.selectedDate);
-              render();
-            }
-            return;
-          }
-          
-          // Handle multi-stop groups (expand/collapse)
-          const multiStopGroup = e.target.closest('.stop-group[data-group-id]');
-          if (multiStopGroup) {
-            e.preventDefault();
-            e.stopPropagation();
-            
-            const groupId = multiStopGroup.getAttribute('data-group-id');
-            
-            // Zoom map to group
-            if (window.stopsListMap) {
-              const groupStops = state.stopsListData.filter(s => {
-                const baseName = s.stop_name.replace(/\s+\d+[A-Za-z]?$/, '').trim();
-                return baseName === groupId;
-              });
-              
-              if (groupStops.length > 0) {
-                const groupBounds = window.L.latLngBounds();
-                groupStops.forEach(stop => {
-                  if (stop.stop_lat && stop.stop_lon) {
-                    const lat = parseFloat(stop.stop_lat);
-                    const lon = parseFloat(stop.stop_lon);
-                    if (!isNaN(lat) && !isNaN(lon)) {
-                      groupBounds.extend([lat, lon]);
-                    }
-                  }
-                });
-                
-                if (groupBounds.isValid()) {
-                  window.stopsListMap.flyToBounds(groupBounds, { 
-                    padding: [50, 50], 
-                    maxZoom: 17,
-                    duration: 0.5
-                  });
-                }
-              }
-            }
-            
-            // Toggle expansion
-            if (state.expandedStopGroup === groupId) {
-              state.expandedStopGroup = null;
-            } else {
-              state.expandedStopGroup = groupId;
-            }
-            
-            // Re-render list (without reloading data)
-            const groupsArray = getOrBuildGroupsArray(state.stopsListData);
-            renderStopsList(groupsArray);
-            setupInfiniteScroll(); // Re-setup observer after re-render
-          }
-          
-          // Handle individual stop items
-          const stopItem = e.target.closest('.stop-item[data-stop-id]');
-          if (stopItem) {
-            e.preventDefault();
-            e.stopPropagation();
-            
-            const stopId = stopItem.getAttribute('data-stop-id');
-            const stop = state.gtfsData.stopsIndex[stopId];
-            
-            if (stop && window.stopsListMap) {
-              window.stopsListMap.setView(
-                [parseFloat(stop.stop_lat), parseFloat(stop.stop_lon)],
-                17
-              );
-            }
-            
-            if (stop) {
-              state.selectedStop = stop;
-              state.stopViewFilteredRoutes = [];
-              render();
-              await prepareStopDetailData(stop, state.selectedDate);
-              render();
-            }
-          }
-        };
-        
-        stopsListContainer._stopGroupHandler = groupHandler;
-        stopsListContainer.addEventListener('click', groupHandler);
       }
       
       $('back-button')?.addEventListener('click', () => {

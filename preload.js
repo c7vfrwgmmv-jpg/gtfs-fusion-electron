@@ -47,6 +47,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   queryStopsPaginated: (params) => ipcRenderer.invoke('query-stops-paginated', params),
   queryStopsCount: (params) => ipcRenderer.invoke('query-stops-count', params),
   
+  // Query ALL stops for map (lightweight - only coords and names)
+  queryAllStopsForMap: (params) => ipcRenderer.invoke('query-all-stops-for-map', params),
+  
   // Prepare stop detail data (combines routes and departures for a stop)
   prepareStopDetailData: (params) => ipcRenderer.invoke('prepare-stop-detail-data', params),
   
