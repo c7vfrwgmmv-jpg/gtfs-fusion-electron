@@ -53,6 +53,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Prepare stop detail data (combines routes and departures for a stop)
   prepareStopDetailData: (params) => ipcRenderer.invoke('prepare-stop-detail-data', params),
   
+  // Query timetable for stop (fully aggregated with legends)
+  queryTimetableForStop: (params) => ipcRenderer.invoke('query-timetable-for-stop', params),
+  
   // Listen to load progress updates
   onLoadProgress: (callback) => {
     const subscription = (event, data) => callback(data);

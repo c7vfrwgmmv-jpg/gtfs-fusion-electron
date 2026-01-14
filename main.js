@@ -1944,6 +1944,605 @@ ipcMain.handle('prepare-stop-detail-data', async (event, { stopId, date }) => {
 });
 
 // ════════════════════════════════════════════════════════════════
+// QUERY TIMETABLE FOR STOP (FULLY AGGREGATED WITH LEGENDS)
+// ════════════════════════════════════════════════════════════════
+
+ipcMain.handle('query-timetable-for-stop', async (event, { stopId, date, routeId = null }) => {
+  if (!db) throw new Error('Database not loaded');
+  
+  const conn = db.connect();
+  
+  try {
+    console.log('[SQL] query-timetable-for-stop START', { stopId, date, routeId });
+    
+    if (!stopId) {
+      throw new Error('stopId is required');
+    }
+    
+    if (!date || date.length !== 8) {
+      throw new Error('date must be in YYYYMMDD format');
+    }
+    
+    // Get table availability
+    const tables = await new Promise((resolve, reject) => {
+      conn.all(`SELECT table_name FROM information_schema.tables WHERE table_schema = 'main'`, 
+        (err, rows) => {
+          if (err) reject(err);
+          else resolve(rows);
+        });
+    });
+    
+    const tableSet = new Set(tables.map(t => t.table_name.toLowerCase()));
+    const hasCalendar = tableSet.has('calendar');
+    const hasCalendarDates = tableSet.has('calendar_dates');
+    
+    // Helper: Get services for a specific date
+    const getServicesForDate = async (targetDate) => {
+      const dateObj = new Date(
+        parseInt(targetDate.substring(0, 4)),
+        parseInt(targetDate.substring(4, 6)) - 1,
+        parseInt(targetDate.substring(6, 8))
+      );
+      const dayNames = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+      const dayColumn = dayNames[dateObj.getDay()];
+      
+      let query, params;
+      
+      if (hasCalendar && hasCalendarDates) {
+        query = `
+          SELECT service_id FROM calendar
+          WHERE start_date <= $1 AND end_date >= $2 AND ${dayColumn} = '1'
+          UNION
+          SELECT service_id FROM calendar_dates WHERE date = $3 AND exception_type = '1'
+          EXCEPT
+          SELECT service_id FROM calendar_dates WHERE date = $4 AND exception_type = '2'
+        `;
+        params = [targetDate, targetDate, targetDate, targetDate];
+      } else if (hasCalendar) {
+        query = `
+          SELECT service_id FROM calendar
+          WHERE start_date <= $1 AND end_date >= $2 AND ${dayColumn} = '1'
+        `;
+        params = [targetDate, targetDate];
+      } else {
+        // No calendar - return empty (all services assumed active)
+        return [];
+      }
+      
+      const rows = await new Promise((resolve, reject) => {
+        conn.all(query, ...params, (err, rows) => {
+          if (err) reject(err);
+          else resolve(rows);
+        });
+      });
+      
+      return rows.map(r => r.service_id);
+    };
+    
+    // Get Polish holidays for the week containing target date
+    const calculateEaster = (year) => {
+      const a = year % 19;
+      const b = Math.floor(year / 100);
+      const c = year % 100;
+      const d = Math.floor(b / 4);
+      const e = b % 4;
+      const f = Math.floor((b + 8) / 25);
+      const g = Math.floor((b - f + 1) / 3);
+      const h = (19 * a + b - d - g + 15) % 30;
+      const i = Math.floor(c / 4);
+      const k = c % 4;
+      const l = (32 + 2 * e + 2 * i - h - k) % 7;
+      const m = Math.floor((a + 11 * h + 22 * l) / 451);
+      const month = Math.floor((h + l - 7 * m + 114) / 31);
+      const day = ((h + l - 7 * m + 114) % 31) + 1;
+      return new Date(year, month - 1, day);
+    };
+    
+    const getPolishHolidays = (year) => {
+      const holidays = [];
+      holidays.push({ date: `${year}0101`, name: 'Nowy Rok' });
+      holidays.push({ date: `${year}0106`, name: 'Trzech Króli' });
+      holidays.push({ date: `${year}0501`, name: 'Święto Pracy' });
+      holidays.push({ date: `${year}0503`, name: 'Święto Konstytucji 3 Maja' });
+      holidays.push({ date: `${year}0815`, name: 'Wniebowzięcie NMP' });
+      holidays.push({ date: `${year}1101`, name: 'Wszystkich Świętych' });
+      holidays.push({ date: `${year}1111`, name: 'Święto Niepodległości' });
+      holidays.push({ date: `${year}1225`, name: 'Boże Narodzenie' });
+      holidays.push({ date: `${year}1226`, name: 'Drugi dzień Świąt' });
+      
+      const easter = calculateEaster(year);
+      const easterMonday = new Date(easter);
+      easterMonday.setDate(easter.getDate() + 1);
+      const formatDate = (d) => `${d.getFullYear()}${String(d.getMonth()+1).padStart(2,'0')}${String(d.getDate()).padStart(2,'0')}`;
+      holidays.push({ date: formatDate(easterMonday), name: 'Poniedziałek Wielkanocny' });
+      
+      const corpusChristi = new Date(easter);
+      corpusChristi.setDate(easter.getDate() + 60);
+      holidays.push({ date: formatDate(corpusChristi), name: 'Boże Ciało' });
+      
+      return holidays;
+    };
+    
+    // Find Monday of the week containing target date
+    const targetDateObj = new Date(
+      parseInt(date.substring(0, 4)),
+      parseInt(date.substring(4, 6)) - 1,
+      parseInt(date.substring(6, 8))
+    );
+    const dayOfWeek = targetDateObj.getDay(); // 0=Sun, 1=Mon, ..., 6=Sat
+    const daysToMonday = (dayOfWeek === 0 ? 6 : dayOfWeek - 1);
+    const mondayDate = new Date(targetDateObj);
+    mondayDate.setDate(targetDateObj.getDate() - daysToMonday);
+    
+    const formatDate = (d) => `${d.getFullYear()}${String(d.getMonth()+1).padStart(2,'0')}${String(d.getDate()).padStart(2,'0')}`;
+    
+    // Get dates for each day of the week
+    const weekDates = {
+      monday: formatDate(mondayDate),
+      tuesday: formatDate(new Date(mondayDate.getTime() + 1 * 24 * 60 * 60 * 1000)),
+      wednesday: formatDate(new Date(mondayDate.getTime() + 2 * 24 * 60 * 60 * 1000)),
+      thursday: formatDate(new Date(mondayDate.getTime() + 3 * 24 * 60 * 60 * 1000)),
+      friday: formatDate(new Date(mondayDate.getTime() + 4 * 24 * 60 * 60 * 1000)),
+      saturday: formatDate(new Date(mondayDate.getTime() + 5 * 24 * 60 * 60 * 1000)),
+      sunday: formatDate(new Date(mondayDate.getTime() + 6 * 24 * 60 * 60 * 1000))
+    };
+    
+    // Get holidays for this week
+    const year = targetDateObj.getFullYear();
+    const allHolidays = [...getPolishHolidays(year), ...getPolishHolidays(year + 1)];
+    const weekHolidays = allHolidays.filter(h => {
+      return Object.values(weekDates).includes(h.date);
+    });
+    
+    // Map holidays by day of week
+    const holidaysByDayOfWeek = new Map();
+    weekHolidays.forEach(holiday => {
+      const hDate = new Date(
+        parseInt(holiday.date.substring(0, 4)),
+        parseInt(holiday.date.substring(4, 6)) - 1,
+        parseInt(holiday.date.substring(6, 8))
+      );
+      const hDayOfWeek = hDate.getDay();
+      holidaysByDayOfWeek.set(hDayOfWeek, holiday);
+    });
+    
+    // Collect weekday dates (Mon-Fri) excluding weekday holidays
+    const weekdayHolidays = weekHolidays.filter(h => {
+      const hDate = new Date(
+        parseInt(h.date.substring(0, 4)),
+        parseInt(h.date.substring(4, 6)) - 1,
+        parseInt(h.date.substring(6, 8))
+      );
+      const hDow = hDate.getDay();
+      return hDow >= 1 && hDow <= 5; // Mon-Fri
+    });
+    
+    const weekdayDates = [];
+    for (let i = 0; i < 5; i++) {
+      const d = new Date(mondayDate.getTime() + i * 24 * 60 * 60 * 1000);
+      const dStr = formatDate(d);
+      if (!weekdayHolidays.some(h => h.date === dStr)) {
+        weekdayDates.push(dStr);
+      }
+    }
+    
+    // Get all departures for the stop
+    const departuresQuery = routeId 
+      ? `
+        SELECT 
+          t.trip_id,
+          st.departure_time,
+          t.trip_headsign,
+          r.route_id,
+          t.service_id
+        FROM stop_times st
+        JOIN trips t ON st.trip_id = t.trip_id
+        JOIN routes r ON t.route_id = r.route_id
+        WHERE st.stop_id = $1 AND r.route_id = $2
+        ORDER BY st.departure_time
+      `
+      : `
+        SELECT 
+          t.trip_id,
+          st.departure_time,
+          t.trip_headsign,
+          r.route_id,
+          t.service_id
+        FROM stop_times st
+        JOIN trips t ON st.trip_id = t.trip_id
+        JOIN routes r ON t.route_id = r.route_id
+        WHERE st.stop_id = $1
+        ORDER BY st.departure_time
+      `;
+    
+    const allDepartures = await new Promise((resolve, reject) => {
+      conn.all(departuresQuery, ...(routeId ? [stopId, routeId] : [stopId]), (err, rows) => {
+        if (err) reject(err);
+        else resolve(rows);
+      });
+    });
+    
+    // Get terminus for each trip (last stop)
+    const tripTermini = new Map();
+    for (const dep of allDepartures) {
+      if (!tripTermini.has(dep.trip_id)) {
+        const stopTimesQuery = `
+          SELECT stop_id, stop_sequence 
+          FROM stop_times 
+          WHERE trip_id = $1 
+          ORDER BY stop_sequence DESC 
+          LIMIT 1
+        `;
+        const lastStop = await new Promise((resolve, reject) => {
+          conn.get(stopTimesQuery, [dep.trip_id], (err, row) => {
+            if (err) reject(err);
+            else resolve(row);
+          });
+        });
+        if (lastStop) {
+          tripTermini.set(dep.trip_id, lastStop.stop_id);
+        }
+      }
+    }
+    
+    // Find main terminus (most common)
+    const terminusCounts = new Map();
+    tripTermini.forEach(terminusId => {
+      terminusCounts.set(terminusId, (terminusCounts.get(terminusId) || 0) + 1);
+    });
+    let mainTerminusStopId = null;
+    let maxCount = 0;
+    terminusCounts.forEach((count, stopId) => {
+      if (count > maxCount) {
+        maxCount = count;
+        mainTerminusStopId = stopId;
+      }
+    });
+    
+    // Get main destination name
+    let mainDestination = '';
+    if (mainTerminusStopId) {
+      const headsignsForMain = allDepartures
+        .filter(d => tripTermini.get(d.trip_id) === mainTerminusStopId)
+        .map(d => d.trip_headsign)
+        .filter(h => h && h.trim());
+      
+      if (headsignsForMain.length > 0) {
+        const headsignCounts = new Map();
+        headsignsForMain.forEach(h => {
+          headsignCounts.set(h, (headsignCounts.get(h) || 0) + 1);
+        });
+        let mainHeadsign = '';
+        let maxHCount = 0;
+        headsignCounts.forEach((count, h) => {
+          if (count > maxHCount) {
+            maxHCount = count;
+            mainHeadsign = h;
+          }
+        });
+        mainDestination = mainHeadsign;
+      }
+      
+      if (!mainDestination) {
+        const stopQuery = `SELECT stop_name FROM stops WHERE stop_id = $1 LIMIT 1`;
+        const stopRow = await new Promise((resolve, reject) => {
+          conn.get(stopQuery, [mainTerminusStopId], (err, row) => {
+            if (err) reject(err);
+            else resolve(row);
+          });
+        });
+        if (stopRow) {
+          mainDestination = stopRow.stop_name;
+        }
+      }
+    }
+    
+    // Build alternative termini map
+    const alternativeTermini = new Map();
+    let nextLetter = 'a';
+    
+    // Process columns
+    const processColumn = async (dates, isWeekday) => {
+      const servicesSet = new Set();
+      for (const d of dates) {
+        const services = await getServicesForDate(d);
+        services.forEach(s => servicesSet.add(s));
+      }
+      const services = Array.from(servicesSet);
+      
+      const columnDepartures = allDepartures.filter(d => services.includes(d.service_id));
+      
+      const hourGroups = {};
+      const minuteWeekdayMap = new Map(); // key: "HH:MM:terminus" -> Set of day indices
+      
+      columnDepartures.forEach(dep => {
+        if (!dep.departure_time) return;
+        const [hourStr, minute] = dep.departure_time.split(':');
+        let hour = parseInt(hourStr, 10);
+        let displayHour = hour % 24;
+        
+        // Time window: 04:00 to next day 03:59
+        if ((hour >= 4 && hour < 24) || (hour >= 24 && hour < 28)) {
+          const terminusStopId = tripTermini.get(dep.trip_id);
+          let terminusKey = '';
+          
+          if (terminusStopId && terminusStopId !== mainTerminusStopId) {
+            const tripHeadsign = dep.trip_headsign;
+            if (tripHeadsign && tripHeadsign !== mainDestination) {
+              if (!alternativeTermini.has(tripHeadsign)) {
+                alternativeTermini.set(tripHeadsign, nextLetter);
+                nextLetter = String.fromCharCode(nextLetter.charCodeAt(0) + 1);
+              }
+              terminusKey = alternativeTermini.get(tripHeadsign);
+            } else if (!tripHeadsign) {
+              const stopQuery = `SELECT stop_name FROM stops WHERE stop_id = $1 LIMIT 1`;
+              const stopRow = await new Promise((resolve, reject) => {
+                conn.get(stopQuery, [terminusStopId], (err, row) => {
+                  if (err) reject(err);
+                  else resolve(row);
+                });
+              });
+              const terminusName = stopRow?.stop_name || terminusStopId;
+              if (terminusName !== mainDestination) {
+                if (!alternativeTermini.has(terminusName)) {
+                  alternativeTermini.set(terminusName, nextLetter);
+                  nextLetter = String.fromCharCode(nextLetter.charCodeAt(0) + 1);
+                }
+                terminusKey = alternativeTermini.get(terminusName);
+              }
+            }
+          }
+          
+          if (/^[0-5]\d$/.test(minute)) {
+            if (!hourGroups[displayHour]) hourGroups[displayHour] = [];
+            
+            if (isWeekday) {
+              const mapKey = `${String(displayHour).padStart(2, '0')}:${minute}:${terminusKey}`;
+              if (!minuteWeekdayMap.has(mapKey)) {
+                minuteWeekdayMap.set(mapKey, new Set());
+              }
+              
+              // Determine which weekday this departure runs on
+              const serviceId = dep.service_id;
+              dates.forEach((dateStr, dayIdx) => {
+                // Check if this service runs on this specific date
+                getServicesForDate(dateStr).then(servicesForDay => {
+                  if (servicesForDay.includes(serviceId)) {
+                    minuteWeekdayMap.get(mapKey).add(dayIdx);
+                  }
+                });
+              });
+            }
+            
+            hourGroups[displayHour].push({ minute, terminusKey, serviceId: dep.service_id });
+          }
+        }
+      });
+      
+      // Add weekday annotations
+      const weekdayAnnotations = new Map();
+      let nextSuperscript = 1;
+      
+      if (isWeekday) {
+        // Wait for all async operations to complete
+        await new Promise(resolve => setTimeout(resolve, 100));
+        
+        const hourPatterns = new Map();
+        Object.keys(hourGroups).forEach(hour => {
+          hourPatterns.set(hour, new Map());
+          hourGroups[hour].forEach(entry => {
+            const { minute, terminusKey } = entry;
+            const mapKey = `${String(hour).padStart(2, '0')}:${minute}:${terminusKey}`;
+            const weekdaysSet = minuteWeekdayMap.get(mapKey);
+            
+            if (weekdaysSet && weekdaysSet.size > 0) {
+              const pattern = Array.from(weekdaysSet).sort().join(',');
+              hourPatterns.get(hour).set(mapKey, {
+                pattern,
+                dayCount: weekdaysSet.size,
+                minute,
+                terminusKey
+              });
+            }
+          });
+        });
+        
+        // Determine which patterns need annotation
+        const patternsToAnnotate = new Set();
+        Object.keys(hourGroups).forEach(hour => {
+          const patterns = hourPatterns.get(hour);
+          const patternCounts = new Map();
+          const patternDayCounts = new Map();
+          
+          patterns.forEach((info, mapKey) => {
+            const count = patternCounts.get(info.pattern) || 0;
+            patternCounts.set(info.pattern, count + 1);
+            patternDayCounts.set(info.pattern, info.dayCount);
+          });
+          
+          const uniquePatterns = Array.from(patternCounts.keys()).filter(p => {
+            const dayCount = patternDayCounts.get(p);
+            return dayCount < dates.length;
+          });
+          
+          if (uniquePatterns.length === 1) {
+            patternsToAnnotate.add(uniquePatterns[0]);
+          } else if (uniquePatterns.length === 2) {
+            const pattern1 = uniquePatterns[0];
+            const pattern2 = uniquePatterns[1];
+            const count1 = patternDayCounts.get(pattern1);
+            const count2 = patternDayCounts.get(pattern2);
+            
+            if (count1 < count2) {
+              patternsToAnnotate.add(pattern1);
+            } else if (count2 < count1) {
+              patternsToAnnotate.add(pattern2);
+            } else {
+              patternsToAnnotate.add(pattern1);
+              patternsToAnnotate.add(pattern2);
+            }
+          } else if (uniquePatterns.length > 0) {
+            uniquePatterns.forEach(p => patternsToAnnotate.add(p));
+          }
+        });
+        
+        // Apply annotations
+        Object.keys(hourGroups).forEach(hour => {
+          const newMinutes = [];
+          hourGroups[hour].forEach(entry => {
+            const { minute, terminusKey } = entry;
+            const mapKey = `${String(hour).padStart(2, '0')}:${minute}:${terminusKey}`;
+            const weekdaysSet = minuteWeekdayMap.get(mapKey);
+            let weekdayAnnotation = '';
+            
+            if (weekdaysSet && weekdaysSet.size > 0 && weekdaysSet.size < dates.length) {
+              const weekdaysKey = Array.from(weekdaysSet).sort().join(',');
+              
+              if (patternsToAnnotate.has(weekdaysKey)) {
+                if (!weekdayAnnotations.has(weekdaysKey)) {
+                  const superscripts = ['⁰', '¹', '²', '³', '⁴', '⁵', '⁶', '⁷', '⁸', '⁹'];
+                  
+                  if (weekdaysSet.size === 1) {
+                    const dayIndex = Array.from(weekdaysSet)[0];
+                    const weekdayNumber = dayIndex + 1;
+                    weekdayAnnotations.set(weekdaysKey, superscripts[weekdayNumber]);
+                  } else {
+                    weekdayAnnotations.set(weekdaysKey, superscripts[nextSuperscript]);
+                    nextSuperscript++;
+                  }
+                }
+                weekdayAnnotation = weekdayAnnotations.get(weekdaysKey);
+              }
+            }
+            
+            newMinutes.push(minute + terminusKey + weekdayAnnotation);
+          });
+          hourGroups[hour] = newMinutes;
+        });
+      } else {
+        // Non-weekday: just format
+        Object.keys(hourGroups).forEach(hour => {
+          hourGroups[hour] = hourGroups[hour].map(entry => entry.minute + entry.terminusKey);
+        });
+      }
+      
+      // Sort minutes
+      Object.keys(hourGroups).forEach(hour => {
+        hourGroups[hour].sort((a, b) => {
+          const minA = parseInt(a.replace(/[^0-9]/g, ''));
+          const minB = parseInt(b.replace(/[^0-9]/g, ''));
+          return minA - minB;
+        });
+      });
+      
+      // Order hours 4-23, 0-3
+      const hourOrder = [];
+      for (let h = 4; h < 24; h++) hourOrder.push(h);
+      for (let h = 0; h < 4; h++) hourOrder.push(h);
+      const filteredOrder = hourOrder.filter(h => hourGroups[h]);
+      const result = {};
+      filteredOrder.forEach(h => { result[h] = hourGroups[h]; });
+      
+      return { timesByHour: result, weekdayAnnotations };
+    };
+    
+    // Process all columns
+    const weekdayResult = await processColumn(weekdayDates, true);
+    
+    const saturdayHoliday = holidaysByDayOfWeek.get(6);
+    const sundayHoliday = holidaysByDayOfWeek.get(0);
+    
+    const saturdayResult = saturdayHoliday
+      ? await processColumn([saturdayHoliday.date], false)
+      : await processColumn([weekDates.saturday], false);
+    
+    const sundayResult = sundayHoliday
+      ? await processColumn([sundayHoliday.date], false)
+      : await processColumn([weekDates.sunday], false);
+    
+    const weekdayHolidayResults = [];
+    for (const holiday of weekdayHolidays) {
+      const result = await processColumn([holiday.date], false);
+      weekdayHolidayResults.push({
+        name: holiday.name,
+        date: holiday.date,
+        times: result.timesByHour
+      });
+    }
+    
+    // Build legends
+    const legendParts = [];
+    
+    // Weekday annotations legend
+    if (weekdayResult.weekdayAnnotations.size > 0) {
+      const weekdayNames = ['poniedziałek', 'wtorek', 'środa', 'czwartek', 'piątek'];
+      const weekdayItems = [];
+      
+      weekdayResult.weekdayAnnotations.forEach((symbol, weekdaysKey) => {
+        const dayIndices = weekdaysKey.split(',').map(s => parseInt(s));
+        const dayNames = dayIndices.map(i => weekdayNames[i]).join(', ');
+        weekdayItems.push({ symbol, description: dayNames });
+      });
+      
+      if (weekdayItems.length > 0) {
+        legendParts.push({
+          type: 'weekday',
+          items: weekdayItems
+        });
+      }
+    }
+    
+    // Terminus annotations legend
+    if (alternativeTermini.size > 0) {
+      const terminusItems = [];
+      alternativeTermini.forEach((letter, terminus) => {
+        terminusItems.push({ symbol: letter, description: `do ${terminus}` });
+      });
+      legendParts.push({
+        type: 'terminus',
+        items: terminusItems
+      });
+    }
+    
+    console.log('[SQL] query-timetable-for-stop SUCCESS');
+    
+    return {
+      columns: {
+        weekday: {
+          name: 'Dzień powszedni',
+          times: weekdayResult.timesByHour
+        },
+        saturday: {
+          name: saturdayHoliday ? saturdayHoliday.name : 'Sobota',
+          times: saturdayResult.timesByHour,
+          isHoliday: !!saturdayHoliday
+        },
+        sunday: {
+          name: sundayHoliday ? sundayHoliday.name : 'Niedziela',
+          times: sundayResult.timesByHour,
+          isHoliday: !!sundayHoliday
+        },
+        weekdayHolidays: weekdayHolidayResults
+      },
+      legends: legendParts,
+      metadata: {
+        stopId,
+        date,
+        routeId,
+        mainDestination,
+        weekDates
+      }
+    };
+    
+  } catch (err) {
+    console.error('[SQL] query-timetable-for-stop FAILED:', err);
+    throw err;
+  } finally {
+    conn.close();
+  }
+});
+
+// ════════════════════════════════════════════════════════════════
 
 app.whenReady().then(createWindow);
 
