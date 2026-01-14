@@ -1505,34 +1505,45 @@ ipcMain.handle('query-all-stops-for-map', async (event, { searchQuery = '' }) =>
   const conn = db.connect();
   
   try {
-    const whereClauses = [];
-    const params = [];
+    let query;
+    let params = [];
     
     if (searchQuery) {
-      whereClauses.push('stop_name LIKE ?');
-      params.push(`%${searchQuery}%`);
+      // Count routes per stop with search filter
+      query = `
+        SELECT 
+          s.stop_id,
+          s.stop_name,
+          s.stop_lat,
+          s.stop_lon,
+          COUNT(DISTINCT t.route_id) as routeCount
+        FROM stops s
+        LEFT JOIN stop_times st ON s.stop_id = st.stop_id
+        LEFT JOIN trips t ON st.trip_id = t.trip_id
+        WHERE s.stop_name ILIKE $1
+        GROUP BY s.stop_id, s.stop_name, s.stop_lat, s.stop_lon
+        ORDER BY s.stop_name
+      `;
+      params = [`%${searchQuery}%`];
+    } else {
+      // Count routes per stop without filter
+      query = `
+        SELECT 
+          s.stop_id,
+          s.stop_name,
+          s.stop_lat,
+          s.stop_lon,
+          COUNT(DISTINCT t.route_id) as routeCount
+        FROM stops s
+        LEFT JOIN stop_times st ON s.stop_id = st.stop_id
+        LEFT JOIN trips t ON st.trip_id = t.trip_id
+        GROUP BY s.stop_id, s.stop_name, s.stop_lat, s.stop_lon
+        ORDER BY s.stop_name
+      `;
     }
     
-    const whereClause = whereClauses.length > 0 ? `WHERE ${whereClauses.join(' AND ')}` : '';
-    
-    // Count routes per stop
-    const query = `
-      SELECT 
-        s.stop_id,
-        s.stop_name,
-        s.stop_lat,
-        s.stop_lon,
-        COUNT(DISTINCT t.route_id) as routeCount
-      FROM stops s
-      LEFT JOIN stop_times st ON s.stop_id = st.stop_id
-      LEFT JOIN trips t ON st.trip_id = t.trip_id
-      ${whereClause}
-      GROUP BY s.stop_id, s.stop_name, s.stop_lat, s.stop_lon
-      ORDER BY s.stop_name
-    `;
-    
     const rows = await new Promise((resolve, reject) => {
-      conn.all(query, params, (err, rows) => {
+      conn.all(query, ...params, (err, rows) => {
         err ? reject(err) : resolve(rows);
       });
     });
