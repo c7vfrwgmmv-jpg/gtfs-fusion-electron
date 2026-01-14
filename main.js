@@ -1298,7 +1298,7 @@ ipcMain.handle('query-stops-paginated', async (event, { searchQuery, offset, lim
     const safeOffset = Math.max(0, offset || 0);
     
     if (searchQuery && searchQuery.trim()) {
-      // SEARCH MODE: Use ILIKE (case-insensitive) with index
+      // SEARCH MODE: Use ILIKE (case-insensitive) on stop_name only
       const searchTerm = `%${searchQuery.trim()}%`;
       
       query = `
@@ -1313,7 +1313,7 @@ ipcMain.handle('query-stops-paginated', async (event, { searchQuery, offset, lim
           LEFT JOIN stop_times st ON s.stop_id = st.stop_id
           LEFT JOIN trips t ON st.trip_id = t.trip_id
           LEFT JOIN routes r ON t.route_id = r.route_id
-          WHERE s.stop_name ILIKE ? OR COALESCE(s.stop_desc, '') ILIKE ?
+          WHERE s.stop_name ILIKE ?
         ),
         stop_routes AS (
           SELECT 
@@ -1337,14 +1337,14 @@ ipcMain.handle('query-stops-paginated', async (event, { searchQuery, offset, lim
             COUNT(dr.route_id) as route_count
           FROM stops s
           LEFT JOIN distinct_routes dr ON s.stop_id = dr.stop_id
-          WHERE s.stop_name ILIKE ? OR COALESCE(s.stop_desc, '') ILIKE ?
+          WHERE s.stop_name ILIKE ?
           GROUP BY s.stop_id, s.stop_name, s.stop_lat, s.stop_lon, ${parentStationGroup}
           ORDER BY s.stop_name
           LIMIT ? OFFSET ?
         )
         SELECT * FROM stop_routes
       `;
-      params = [searchTerm, searchTerm, searchTerm, searchTerm, safeLimit, safeOffset];
+      params = [searchTerm, searchTerm, safeLimit, safeOffset];
       
     } else {
       // BROWSE MODE: Alphabetical pagination
@@ -1445,14 +1445,14 @@ ipcMain.handle('query-stops-count', async (event, { searchQuery }) => {
     let query, params;
     
     if (searchQuery && searchQuery.trim()) {
-      // Count ILIKE matches
+      // Count ILIKE matches on stop_name only
       const searchTerm = `%${searchQuery.trim()}%`;
       query = `
         SELECT COUNT(*) as count 
         FROM stops 
-        WHERE stop_name ILIKE ? OR COALESCE(stop_desc, '') ILIKE ?
+        WHERE stop_name ILIKE ?
       `;
-      params = [searchTerm, searchTerm];
+      params = [searchTerm];
     } else {
       // Count all stops
       query = `SELECT COUNT(*) as count FROM stops`;

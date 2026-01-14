@@ -5720,9 +5720,17 @@ async function renderStopsView() {
     // Setup infinite scroll observer (only once)
     setupInfiniteScroll();
     
-    // Initialize map (only once)
+    // Initialize or update map
     if (!window.stopsListMap) {
       await initializeStopsMap(state.stopsListData);
+    } else {
+      // Map exists but may need to be reattached if DOM was recreated
+      const stopsMap = $('stops-map');
+      if (stopsMap && !stopsMap.hasChildNodes()) {
+        // Map container is empty, reinitialize
+        window.stopsListMap = null;
+        await initializeStopsMap(state.stopsListData);
+      }
     }
     
   } catch (err) {
