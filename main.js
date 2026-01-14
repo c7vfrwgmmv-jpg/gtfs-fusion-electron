@@ -204,33 +204,6 @@ async function buildDatabaseFromZip(zipPath, dbPath, metaPath, hash, sendProgres
       console.log(`[DB] ✓ Loaded ${name}`);
     }
     
-    sendProgress('Creating full-text search indexes...', 93);
-    
-    // Create FTS5 virtual table for stops
-    await execAsync(`
-      CREATE VIRTUAL TABLE IF NOT EXISTS stops_fts USING fts5(
-        stop_id UNINDEXED,
-        stop_name,
-        stop_desc,
-        parent_station UNINDEXED,
-        content=stops,
-        tokenize='porter unicode61'
-      );
-    `);
-    
-    // Populate FTS index from stops table
-    await execAsync(`
-      INSERT INTO stops_fts(stop_id, stop_name, stop_desc, parent_station)
-      SELECT 
-        stop_id, 
-        stop_name, 
-        COALESCE(stop_desc, ''),
-        COALESCE(parent_station, '')
-      FROM stops;
-    `);
-    
-    console.log('[DB] ✓ Created FTS index for stops');
-    
     sendProgress('Building indexes...', 92);
     await execAsync(`
       CREATE INDEX IF NOT EXISTS idx_trips_route ON trips(route_id);
@@ -1291,20 +1264,11 @@ ipcMain.handle('query-stops-paginated', async (event, { searchQuery, offset, lim
     const safeOffset = Math.max(0, offset || 0);
     
     if (searchQuery && searchQuery.trim()) {
-      // SEARCH MODE: Use FTS5 with ranking
-      const searchTerm = searchQuery.trim();
+      // SEARCH MODE: Use ILIKE (case-insensitive) with index
+      const searchTerm = `%${searchQuery.trim()}%`;
       
       query = `
-        WITH matching_stops AS (
-          SELECT 
-            stop_id,
-            rank
-          FROM stops_fts 
-          WHERE stops_fts MATCH ?
-          ORDER BY rank
-          LIMIT ? OFFSET ?
-        ),
-        stop_routes AS (
+        WITH stop_routes AS (
           SELECT 
             s.stop_id,
             s.stop_name,
@@ -1321,16 +1285,17 @@ ipcMain.handle('query-stops-paginated', async (event, { searchQuery, offset, lim
             ) FILTER (WHERE r.route_id IS NOT NULL) as routes_json,
             COUNT(DISTINCT r.route_id) as route_count
           FROM stops s
-          JOIN matching_stops ms ON s.stop_id = ms.stop_id
           LEFT JOIN stop_times st ON s.stop_id = st.stop_id
           LEFT JOIN trips t ON st.trip_id = t.trip_id
           LEFT JOIN routes r ON t.route_id = r.route_id
+          WHERE s.stop_name ILIKE ? OR COALESCE(s.stop_desc, '') ILIKE ?
           GROUP BY s.stop_id, s.stop_name, s.stop_lat, s.stop_lon, s.parent_station
-          ORDER BY ms.rank
+          ORDER BY s.stop_name
+          LIMIT ? OFFSET ?
         )
         SELECT * FROM stop_routes
       `;
-      params = [searchTerm, safeLimit, safeOffset];
+      params = [searchTerm, searchTerm, safeLimit, safeOffset];
       
     } else {
       // BROWSE MODE: Alphabetical pagination
@@ -1409,13 +1374,14 @@ ipcMain.handle('query-stops-count', async (event, { searchQuery }) => {
     let query, params;
     
     if (searchQuery && searchQuery.trim()) {
-      // Count FTS matches
+      // Count ILIKE matches
+      const searchTerm = `%${searchQuery.trim()}%`;
       query = `
         SELECT COUNT(*) as count 
-        FROM stops_fts 
-        WHERE stops_fts MATCH ?
+        FROM stops 
+        WHERE stop_name ILIKE ? OR COALESCE(stop_desc, '') ILIKE ?
       `;
-      params = [searchQuery.trim()];
+      params = [searchTerm, searchTerm];
     } else {
       // Count all stops
       query = `SELECT COUNT(*) as count FROM stops`;
