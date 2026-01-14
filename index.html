@@ -4516,7 +4516,16 @@ if (sel && Array.isArray(sel.stopDetails) && sel.stopDetails.length > 0) {
     const shapeId = variantTrips[0].shape_id;
     
     if (shapeId) {
-      lineGeometry = await getSimplifiedShape(shapeId);
+      try {
+        lineGeometry = await getSimplifiedShape(shapeId);
+        // If empty array returned, reset to null for fallback
+        if (lineGeometry && lineGeometry.length === 0) {
+          lineGeometry = null;
+        }
+      } catch (err) {
+        console.warn('[Route Map] Failed to load shape, using fallback:', err);
+        lineGeometry = null;
+      }
     }
   }
   
@@ -7717,7 +7726,16 @@ $('date-select-stop')?.addEventListener('change', async (e) => {
         let lineGeometry = null;
         
         if (shapeId) {
-          lineGeometry = await getSimplifiedShape(shapeId);
+          try {
+            lineGeometry = await getSimplifiedShape(shapeId);
+            // If empty array returned, reset to null for fallback
+            if (lineGeometry && lineGeometry.length === 0) {
+              lineGeometry = null;
+            }
+          } catch (err) {
+            console.warn('[Stop Detail Map] Failed to load shape, using fallback:', err);
+            lineGeometry = null;
+          }
         }
         
         if (!lineGeometry) {
