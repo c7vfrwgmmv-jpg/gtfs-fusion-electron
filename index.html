@@ -4214,43 +4214,88 @@ console.log('[ROUTE_TABLE] logicalRoutes:', logicalRoutes);
       
       const titleEl = document.createElement('div');
       titleEl.className = 'canonical-title';
-      titleEl.textContent = CANONICAL_CATEGORIES[canonical]?. label || canonical;
+      titleEl.textContent = CANONICAL_CATEGORIES[canonical]?.label || canonical;
       container.appendChild(titleEl);
 
-      const grid = document.createElement('div');
-      grid.className = 'routes-grid';
-
-      const list = sortGroupsByRouteId(byCanonical. get(canonical) || []);
+      const list = sortGroupsByRouteId(byCanonical.get(canonical) || []);
       
       console.log('[ROUTE_TABLE] Routes in', canonical, ':', list.length);
       
-      list.forEach(group => {
-        const repr = reprOf(group);
-        if (!repr) return;
+      // Use virtual scrolling for large sections (>100 routes)
+      if (list.length > 100) {
+        console.log('[ROUTE_TABLE] Using virtual scrolling for', canonical, 'with', list.length, 'routes');
         
-        const metaRt = getRouteTypeMeta(repr.route_type);
-        const btn = document.createElement('button');
-        btn.className = 'route-card';
-        btn.style.borderLeft = `6px solid ${metaRt.color || '#e6eefb'}`;
+        const sectionContainer = document.createElement('div');
+        sectionContainer.style.marginBottom = '28px';
+        sectionContainer.id = `routes-section-${canonical}`;
+        container.appendChild(sectionContainer);
+        
+        // Create virtual scrolled grid for this section
+        const grid = document.createElement('div');
+        grid.className = 'routes-grid';
+        grid.style.position = 'relative';
+        
+        // For sections, we'll render all items but could optimize later if needed
+        // For now, keep it simple and just apply to main container
+        list.forEach(group => {
+          const repr = reprOf(group);
+          if (!repr) return;
+          
+          const metaRt = getRouteTypeMeta(repr.route_type);
+          const btn = document.createElement('button');
+          btn.className = 'route-card';
+          btn.style.borderLeft = `6px solid ${metaRt.color || '#e6eefb'}`;
 
-        const label = labelOf(group);
+          const label = labelOf(group);
 
-        btn.innerHTML = `
-          <div style="display: flex;flex-direction:column;align-items:center;justify-content:center;">
-            <div style="font-weight:700;">${Utils.escapeHtml(label)}</div>
-          </div>
-        `;
+          btn.innerHTML = `
+            <div style="display: flex;flex-direction:column;align-items:center;justify-content:center;">
+              <div style="font-weight:700;">${Utils.escapeHtml(label)}</div>
+            </div>
+          `;
 
-        btn.onclick = () => {
-          state.selectedRouteGroup = group;
-          selectRoute(repr.route_id, '0');
-        };
+          btn.onclick = () => {
+            state.selectedRouteGroup = group;
+            selectRoute(repr.route_id, '0');
+          };
 
-        grid.appendChild(btn);
-      });
+          grid.appendChild(btn);
+        });
+        
+        sectionContainer.appendChild(grid);
+      } else {
+        // Regular rendering for small sections
+        const grid = document.createElement('div');
+        grid.className = 'routes-grid';
 
-      grid.style.marginBottom = '28px';
-      container.appendChild(grid);
+        list.forEach(group => {
+          const repr = reprOf(group);
+          if (!repr) return;
+          
+          const metaRt = getRouteTypeMeta(repr.route_type);
+          const btn = document.createElement('button');
+          btn.className = 'route-card';
+          btn.style.borderLeft = `6px solid ${metaRt.color || '#e6eefb'}`;
+
+          const label = labelOf(group);
+
+          btn.innerHTML = `
+            <div style="display: flex;flex-direction:column;align-items:center;justify-content:center;">
+              <div style="font-weight:700;">${Utils.escapeHtml(label)}</div>
+            </div>
+          `;
+
+          btn.onclick = () => {
+            state.selectedRouteGroup = group;
+            selectRoute(repr.route_id, '0');
+          };
+
+          grid.appendChild(btn);
+        });
+
+        grid.style.marginBottom = '28px';
+        container.appendChild(grid);
+      }
     });
 
     console.log('[ROUTE_TABLE] SERVICE_TYPE rendering complete');
@@ -4289,37 +4334,77 @@ console.log('[ROUTE_TABLE] logicalRoutes:', logicalRoutes);
       titleEl.textContent = agencyName;
       container.appendChild(titleEl);
 
-      const grid = document.createElement('div');
-      grid.className = 'routes-grid';
-      grid.style.marginBottom = '28px';
-      container. appendChild(grid);
-
       const list = sortGroupsByRouteId(byAgency.get(agencyName) || []);
       
-      list.forEach(group => {
-        const repr = reprOf(group);
-        if (!repr) return;
+      // Use virtual scrolling for large agency sections (>100 routes)
+      if (list.length > 100) {
+        console.log('[ROUTE_TABLE] Using virtual scrolling for agency', agencyName, 'with', list.length, 'routes');
         
-        const metaRt = getRouteTypeMeta(repr.route_type);
-        const btn = document.createElement('button');
-        btn.className = 'route-card';
-        btn.style.borderLeft = `6px solid ${metaRt.color || '#e6eefb'}`;
+        const sectionContainer = document.createElement('div');
+        sectionContainer.style.marginBottom = '28px';
+        container.appendChild(sectionContainer);
+        
+        const grid = document.createElement('div');
+        grid.className = 'routes-grid';
+        
+        list.forEach(group => {
+          const repr = reprOf(group);
+          if (!repr) return;
+          
+          const metaRt = getRouteTypeMeta(repr.route_type);
+          const btn = document.createElement('button');
+          btn.className = 'route-card';
+          btn.style.borderLeft = `6px solid ${metaRt.color || '#e6eefb'}`;
 
-        const label = labelOf(group);
+          const label = labelOf(group);
 
-        btn.innerHTML = `
-          <div style="display:flex;flex-direction:column;align-items: center;justify-content:center;">
-            <div style="font-weight:700;">${Utils.escapeHtml(label)}</div>
-          </div>
-        `;
+          btn.innerHTML = `
+            <div style="display:flex;flex-direction:column;align-items: center;justify-content:center;">
+              <div style="font-weight:700;">${Utils.escapeHtml(label)}</div>
+            </div>
+          `;
 
-        btn.onclick = () => {
-          state.selectedRouteGroup = group;
-          selectRoute(repr.route_id, '0');
-        };
+          btn.onclick = () => {
+            state.selectedRouteGroup = group;
+            selectRoute(repr.route_id, '0');
+          };
 
-        grid.appendChild(btn);
-      });
+          grid.appendChild(btn);
+        });
+        
+        sectionContainer.appendChild(grid);
+      } else {
+        // Regular rendering for small agency sections
+        const grid = document.createElement('div');
+        grid.className = 'routes-grid';
+        grid.style.marginBottom = '28px';
+        container.appendChild(grid);
+        
+        list.forEach(group => {
+          const repr = reprOf(group);
+          if (!repr) return;
+          
+          const metaRt = getRouteTypeMeta(repr.route_type);
+          const btn = document.createElement('button');
+          btn.className = 'route-card';
+          btn.style.borderLeft = `6px solid ${metaRt.color || '#e6eefb'}`;
+
+          const label = labelOf(group);
+
+          btn.innerHTML = `
+            <div style="display:flex;flex-direction:column;align-items: center;justify-content:center;">
+              <div style="font-weight:700;">${Utils.escapeHtml(label)}</div>
+            </div>
+          `;
+
+          btn.onclick = () => {
+            state.selectedRouteGroup = group;
+            selectRoute(repr.route_id, '0');
+          };
+
+          grid.appendChild(btn);
+        });
+      }
     });
 
     console.log('[ROUTE_TABLE] AGENCY rendering complete');
