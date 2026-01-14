@@ -1550,14 +1550,22 @@ ipcMain.handle('query-stops-count', async (event, { searchQuery }) => {
     
     const result = await new Promise((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error('Query timeout')), 10000);
-      conn.all(query, ...params, (err, rows) => {
+      
+      const callback = (err, rows) => {
         clearTimeout(timeout);
         if (err) {
           reject(err);
         } else {
           resolve(rows && rows.length > 0 ? rows[0] : { count: 0 });
         }
-      });
+      };
+      
+      // Use spread operator only if params exist
+      if (params.length > 0) {
+        conn.all(query, ...params, callback);
+      } else {
+        conn.all(query, callback);
+      }
     });
     
     return Number(result.count || 0);
