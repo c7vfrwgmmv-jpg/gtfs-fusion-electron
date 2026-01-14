@@ -2255,8 +2255,18 @@ ipcMain.handle('query-timetable-for-stop', async (event, { stopId, date, routeId
       const hourGroups = {};
       const minuteWeekdayMap = new Map(); // key: "HH:MM:terminus" -> Set of day indices
       
-      columnDepartures.forEach(dep => {
-        if (!dep.departure_time) return;
+      // Pre-compute services for each date if weekday column
+      const dateServicesMap = new Map();
+      if (isWeekday) {
+        for (const dateStr of dates) {
+          const servicesForDate = await getServicesForDate(dateStr);
+          dateServicesMap.set(dateStr, servicesForDate);
+        }
+      }
+      
+      // Process departures sequentially to handle async terminus lookup
+      for (const dep of columnDepartures) {
+        if (!dep.departure_time) continue;
         const [hourStr, minute] = dep.departure_time.split(':');
         let hour = parseInt(hourStr, 10);
         let displayHour = hour % 24;
@@ -2302,30 +2312,24 @@ ipcMain.handle('query-timetable-for-stop', async (event, { stopId, date, routeId
                 minuteWeekdayMap.set(mapKey, new Set());
               }
               
-              // Determine which weekday this departure runs on
+              // Determine which weekday this departure runs on using pre-computed services
               const serviceId = dep.service_id;
               dates.forEach((dateStr, dayIdx) => {
-                // Check if this service runs on this specific date
-                getServicesForDate(dateStr).then(servicesForDay => {
-                  if (servicesForDay.includes(serviceId)) {
-                    minuteWeekdayMap.get(mapKey).add(dayIdx);
-                  }
-                });
+                const servicesForDay = dateServicesMap.get(dateStr) || [];
+                if (servicesForDay.includes(serviceId)) {
+                  minuteWeekdayMap.get(mapKey).add(dayIdx);
+                }
               });
             }
             
             hourGroups[displayHour].push({ minute, terminusKey, serviceId: dep.service_id });
           }
         }
-      });
+      }
       
       // Add weekday annotations
       const weekdayAnnotations = new Map();
       let nextSuperscript = 1;
-      
-      if (isWeekday) {
-        // Wait for all async operations to complete
-        await new Promise(resolve => setTimeout(resolve, 100));
         
         const hourPatterns = new Map();
         Object.keys(hourGroups).forEach(hour => {

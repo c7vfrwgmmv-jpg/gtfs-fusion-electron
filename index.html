@@ -3947,6 +3947,29 @@ function filterStopDetailMapLayers(filteredRouteIds = []) {
 // ═══════════════════════════════════════════════════════════════
 
 /**
+ * Open stop timetable modal from route timetable view
+ * Called when clicking on stop name in timetable table
+ * @param {string} stopId - Stop ID
+ */
+async function openStopTimetable(stopId) {
+  if (!stopId || !state.gtfsData || !state.gtfsData.stopsIndex) {
+    console.error('[openStopTimetable] Invalid stopId or missing data');
+    return;
+  }
+  
+  const stop = state.gtfsData.stopsIndex[stopId];
+  if (!stop) {
+    console.error('[openStopTimetable] Stop not found:', stopId);
+    return;
+  }
+  
+  // Pass current route ID for filtering
+  const routeId = state.selectedRoute ? state.selectedRoute.route_id : null;
+  
+  await showStopTimetableModal(stop, routeId);
+}
+
+/**
  * Show stop timetable modal using fully aggregated backend data
  * Backend handles all logic: weekday grouping, terminus detection, annotations
  * Frontend only renders the provided data structure
@@ -4002,12 +4025,12 @@ async function showStopTimetableModal(stop, routeId = null) {
       legends.forEach(legend => {
         if (legend.type === 'weekday' && legend.items && legend.items.length > 0) {
           const weekdayItems = legend.items.map(item => 
-            `<span style="font-weight: bold;">${escapeHtml(item.symbol)}</span> - ${escapeHtml(item.description)}`
+            `<span style="font-weight: bold;">${Utils.escapeHtml(item.symbol)}</span> - ${Utils.escapeHtml(item.description)}`
           );
           legendParts.push(weekdayItems.join(' • '));
         } else if (legend.type === 'terminus' && legend.items && legend.items.length > 0) {
           const terminusItems = legend.items.map(item =>
-            `<span style="font-weight: bold;">${escapeHtml(item.symbol)}</span> - ${escapeHtml(item.description)}`
+            `<span style="font-weight: bold;">${Utils.escapeHtml(item.symbol)}</span> - ${Utils.escapeHtml(item.description)}`
           );
           legendParts.push(terminusItems.join(' • '));
         }
@@ -4020,14 +4043,14 @@ async function showStopTimetableModal(stop, routeId = null) {
     
     // Build table header
     let tableHeaderHTML = `<tr style="background: #e5e7eb;">
-      <th style="padding: 0.1rem 0.3rem; border: 1px solid #ddd; text-align: center; font-size: 0.8rem; font-weight: 700;">${escapeHtml(columns.weekday.name)}</th>
-      <th style="padding: 0.1rem 0.3rem; border: 1px solid #ddd; text-align: center; font-size: 0.8rem; font-weight: 700;">${escapeHtml(columns.saturday.name)}</th>
-      <th style="padding: 0.1rem 0.3rem; border: 1px solid #ddd; text-align: center; font-size: 0.8rem; font-weight: 700;">${escapeHtml(columns.sunday.name)}</th>`;
+      <th style="padding: 0.1rem 0.3rem; border: 1px solid #ddd; text-align: center; font-size: 0.8rem; font-weight: 700;">${Utils.escapeHtml(columns.weekday.name)}</th>
+      <th style="padding: 0.1rem 0.3rem; border: 1px solid #ddd; text-align: center; font-size: 0.8rem; font-weight: 700;">${Utils.escapeHtml(columns.saturday.name)}</th>
+      <th style="padding: 0.1rem 0.3rem; border: 1px solid #ddd; text-align: center; font-size: 0.8rem; font-weight: 700;">${Utils.escapeHtml(columns.sunday.name)}</th>`;
     
     // Add weekday holiday columns
     if (columns.weekdayHolidays && columns.weekdayHolidays.length > 0) {
       columns.weekdayHolidays.forEach(hCol => {
-        tableHeaderHTML += `<th style="padding: 0.1rem 0.3rem; border: 1px solid #ddd; text-align: center; font-size: 0.8rem; font-weight: 700;">${escapeHtml(hCol.name)}</th>`;
+        tableHeaderHTML += `<th style="padding: 0.1rem 0.3rem; border: 1px solid #ddd; text-align: center; font-size: 0.8rem; font-weight: 700;">${Utils.escapeHtml(hCol.name)}</th>`;
       });
     }
     
@@ -4052,13 +4075,13 @@ async function showStopTimetableModal(stop, routeId = null) {
     let headerHTML = '<div style="display: flex; gap: 1rem; align-items: flex-start; padding: 0.75rem 1rem; border-bottom: 2px solid #ddd;">';
     
     if (state.selectedRoute) {
-      headerHTML += `<div style="border: 3px solid #000; height: 53px; font-weight: bold; font-size: 1.9rem; text-align: center; line-height: 1.2; min-width: 93px; display: flex; align-items: center; justify-content: center;">${escapeHtml(state.selectedRoute.route_short_name || state.selectedRoute.route_id)}</div>`;
+      headerHTML += `<div style="border: 3px solid #000; height: 53px; font-weight: bold; font-size: 1.9rem; text-align: center; line-height: 1.2; min-width: 93px; display: flex; align-items: center; justify-content: center;">${Utils.escapeHtml(state.selectedRoute.route_short_name || state.selectedRoute.route_id)}</div>`;
     }
     
-    headerHTML += `<div style="flex: 1; min-width: 0;"><div style="font-size: 1.75rem; font-weight: 900; line-height: 1.1; text-transform: uppercase;">${escapeHtml(stop.stop_name)}</div>`;
+    headerHTML += `<div style="flex: 1; min-width: 0;"><div style="font-size: 1.75rem; font-weight: 900; line-height: 1.1; text-transform: uppercase;">${Utils.escapeHtml(stop.stop_name)}</div>`;
     
     if (metadata.mainDestination && state.selectedRoute) {
-      headerHTML += `<div style="font-size: 1.5rem; font-weight: 700; line-height: 1.2; text-transform: uppercase; display: flex; align-items: center; white-space: nowrap;"><span style="margin-right: 0.3em;">&#8594;</span><span style="overflow-wrap: anywhere;">${escapeHtml(metadata.mainDestination)}</span></div>`;
+      headerHTML += `<div style="font-size: 1.5rem; font-weight: 700; line-height: 1.2; text-transform: uppercase; display: flex; align-items: center; white-space: nowrap;"><span style="margin-right: 0.3em;">&#8594;</span><span style="overflow-wrap: anywhere;">${Utils.escapeHtml(metadata.mainDestination)}</span></div>`;
     }
     
     headerHTML += '</div></div>';
