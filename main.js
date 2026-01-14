@@ -1118,7 +1118,10 @@ ipcMain.handle('query-departures-for-stop', async (event, { stopId, date }) => {
       });
     });
     
-    console.log('[SQL] query-departures-for-stop SUCCESS:', rows.length, 'departures');
+    console.log('[SQL] query-departures-for-stop SUCCESS:', rows.length, 'departures for stopId:', stopId, 'date:', date);
+    if (rows.length === 0) {
+      console.warn('[SQL] query-departures-for-stop returned 0 rows - check if date is valid and services are active');
+    }
     return convertBigIntsToNumbers(rows || []);
     
   } catch (err) {

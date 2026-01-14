@@ -5987,6 +5987,15 @@ async function openStopTimetable(stopId) {
     return;
   }
 
+  console.log('[openStopTimetable] Got', allDepartures.length, 'departures for stop', stopId);
+  
+  // Check if we have any departures
+  if (allDepartures.length === 0) {
+    console.warn('[openStopTimetable] No departures found for stop', stopId, 'on date', state.selectedDate);
+    alert('Brak odjazdów dla tego przystanku w wybranym dniu. Sprawdź czy wybrany dzień jest objęty rozkładem jazdy.');
+    return;
+  }
+
   // Determine main destination based on the currently selected route (if any)
   let mainDestination = '';
   let mainTerminusStopId = null;
